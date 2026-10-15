@@ -1,0 +1,16 @@
+# 律 (Ritsu) — Arduino UNO Q 版バーチャル看板娘 (VRM + three.js)
+#   renderer : 静的ファイル(HTML / three.js / VRM)を nginx で配信
+#              /llm/ を LiteLLM (CT201) へ中継し、APIキーはサーバー側で付与
+#   nginx:alpine は arm64 対応のため、ビルド不要でそのまま UNO Q 上で起動できる
+
+services:
+  renderer:
+    image: nginx:alpine
+    container_name: ritsu-renderer
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    env_file: .env                                  # LITELLM_URL / LITELLM_KEY
+    volumes:
+      - ./renderer:/usr/share/nginx/html:ro         # config.js / VRM は編集・差し替えしてリロードするだけ
+      - ./nginx:/etc/nginx/templates:ro             # 起動時に .env の値を埋め込んで default.conf を生成

@@ -1,0 +1,22 @@
+server {
+    listen 80;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # HTML / JS / 設定はキャッシュさせない(編集→リロードで即反映)
+    location ~* \.(html|js)$ {
+        add_header Cache-Control "no-cache";
+    }
+    # VRM(35MB程度)はキャッシュして起動を速く
+    location /models/ {
+        add_header Cache-Control "public, max-age=86400";
+    }
+
+    # LiteLLM への中継。APIキーはここで付与し、ブラウザには渡さない
+    location /llm/ {
+        proxy_pass ${LITELLM_URL}/;
+        proxy_set_header Authorization "Bearer ${LITELLM_KEY}";
+        proxy_set_header Host $proxy_host;
+        proxy_read_timeout 120s;
+    }
+}

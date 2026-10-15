@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Ritsu Kiosk
+Exec=/home/arduino/ritu/ai-arduino-uno-q/kiosk/ritsu-kiosk.sh
+X-GNOME-Autostart-enabled=true

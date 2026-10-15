@@ -56,27 +56,48 @@ chmod 600 .env
 
 ## 3. UNO Q へ配置して起動
 
-```bash
-# WSL から転送（容量の大きいものは /home/arduino 配下へ）
-rsync -av --exclude '.git' ./ arduino@192.168.3.80:/home/arduino/ritsu/
+UNO Q には GitHub の Deploy key（読み取り専用）を登録してあります。
 
-# UNO Q 上で
-cd /home/arduino/ritsu
+```bash
+# 初回
+cd ~/ritu && git clone git@github.com:yuichiro-ota/ai-arduino-uno-q.git
+cd ai-arduino-uno-q
+cp .env.example .env && chmod 600 .env   # LITELLM_KEY を記入（.env は Git の管理外）
 docker compose up -d
+
+# 更新（WSL で push したあと）
+cd ~/ritu/ai-arduino-uno-q && git pull
 ```
 
-`config.js` の編集や VRM の差し替えは、ブラウザを再読み込みするだけで反映されます。`.env` を変えたときは `docker compose up -d --force-recreate` を実行してください。
+`git pull` で取り込んだ `config.js` や JS の変更、VRM の差し替えは、ブラウザを再読み込みするだけで反映されます。`.env` を変えたときは `docker compose up -d --force-recreate` を実行してください。
 
 画面右上の **LLM** ランプが緑なら LiteLLM に接続できています。
 
-## 4. Chromium キオスク表示（HDMI）
+## 4. キオスク表示（UNO Q の画面に全画面で表示）
+
+UNO Q のデスクトップは LightDM + Xfce（X11 `:0`）です。映像は USB-C ハブの DisplayPort（`DP-1`）から出ます。
 
 ```bash
-chromium --kiosk --noerrdialogs --disable-infobars --disable-session-crashed-bubble \
-  --autoplay-policy=no-user-gesture-required http://localhost:8080
+# arduino ユーザーで自動ログイン
+sudo mkdir -p /etc/lightdm/lightdm.conf.d
+printf '[Seat:*]\nautologin-user=arduino\nautologin-session=xfce\n' | sudo tee /etc/lightdm/lightdm.conf.d/50-ritsu-autologin.conf
+sudo groupadd -f autologin && sudo gpasswd -a arduino autologin
+
+# ログイン後に kiosk/ritsu-kiosk.sh を起動
+mkdir -p ~/.config/autostart
+cp kiosk/ritsu-kiosk.desktop ~/.config/autostart/
+sudo reboot
 ```
 
-自動起動させる場合は `~/.config/autostart/ritsu.desktop` に上のコマンドを `Exec=` として登録します。
+`kiosk/ritsu-kiosk.sh` が行うこと:
+- 画面を縦向きに回転（`ROTATE`、既定は `right`）
+- 画面の自動消灯と省電力を無効化
+- Chromium を `--ignore-gpu-blocklist --use-angle=gles` 付きで、`?lite=1`（軽量描画）を開いて起動
+
+注意点:
+- **GPU（Adreno 702）**: 標準の描画のままだと GPU が固まり（`dmesg` に `gpu lockup`）、画面が消えます。`?lite=1` で回避しています。どこまで軽くするかは `renderer/config.js` の描画設定で調整します。
+- **画面が映らない、または映ってすぐ消える**: Xfce のディスプレイ設定が壊れている場合があります。`~/.config/xfce4/xfconf/xfce-perchannel-xml/displays.xml` を退避して `sudo systemctl restart lightdm` を実行してください。
+- **SSH から画面を操作するとき**: `DISPLAY=:0` を付けます。MobaXterm などで X11 転送が有効だと、Windows 側に表示されます。
 
 ## デバッグ
 

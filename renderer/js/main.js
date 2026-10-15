@@ -8,10 +8,10 @@
   /* ===== Three.js シーン ===== */
   const stage = document.getElementById('stage');
   const renderer3d = new THREE.WebGLRenderer({
-    antialias: true,
+    antialias: RITSU_CFG.antialias,
     powerPreference: 'high-performance',
   });
-  renderer3d.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+  renderer3d.setPixelRatio(Math.min(window.devicePixelRatio, RITSU_CFG.pixelRatio));
   renderer3d.setSize(innerWidth, innerHeight);
   stage.appendChild(renderer3d.domElement);
 
@@ -48,7 +48,7 @@
   {
     const geo = new THREE.CircleGeometry(0.02, 6);
     const mat = new THREE.MeshBasicMaterial({ color: 0xffb7c5, transparent: true, opacity: 0.7, side: THREE.DoubleSide });
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < RITSU_CFG.petals; i++) {
       const m = new THREE.Mesh(geo, mat);
       m.position.set((Math.random() - 0.5) * 3, Math.random() * 3, (Math.random() - 0.5) * 1.5 - 0.3);
       m.userData = { v: 0.1 + Math.random() * 0.25, w: Math.random() * 2, ph: Math.random() * 6.28 };

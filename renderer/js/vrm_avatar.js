@@ -19,8 +19,24 @@ class VRMAvatar {
     const vrm = gltf.userData.vrm;
     VRMUtils.removeUnnecessaryVertices?.(gltf.scene);
     VRMUtils.rotateVRM0(vrm);           // VRM0.xの向きをVRM1(+Z正面)に統一
+    if (RITSU_CFG.simpleMaterials) VRMAvatar._simplifyMaterials(vrm.scene);
     scene.add(vrm.scene);
     return new VRMAvatar(vrm, scene);
+  }
+
+  /** MToon(トゥーン+輪郭線)を MeshBasicMaterial に置き換えてGPU負荷を下げる */
+  static _simplifyMaterials(root) {
+    root.traverse(o => {
+      if (!o.isMesh) return;
+      const src = Array.isArray(o.material) ? o.material[0] : o.material;  // [1]は輪郭線パス
+      o.material = new THREE.MeshBasicMaterial({
+        map: src.map || null,
+        color: src.color ? src.color.clone() : 0xffffff,
+        transparent: !!src.transparent,
+        alphaTest: src.alphaTest || 0,
+        side: src.side,
+      });
+    });
   }
 
   constructor(vrm, scene) {

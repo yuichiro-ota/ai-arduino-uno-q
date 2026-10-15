@@ -8,8 +8,12 @@ const RITSU_CFG = (() => {
   const cfg = Object.assign({
     llmUrl: '/llm', llmModel: 'chat',
     llmTimeoutSec: 30, idleMinSec: 25, idleMaxSec: 60,
+    pixelRatio: 1.5, antialias: true, petals: 40, simpleMaterials: false,
   }, window.RITSU_CONFIG || {});
   const q = new URLSearchParams(location.search);
+  // ?lite=1 で描画を最軽量に(GPUが弱い/不安定な環境の切り分け用)
+  if (q.get('lite') === '1') Object.assign(cfg, { pixelRatio: 0.75, antialias: false, petals: 0, simpleMaterials: true });
+  if (q.get('pr')) cfg.pixelRatio = parseFloat(q.get('pr'));
   if (q.get('llm')) cfg.llmUrl = q.get('llm');
   if (q.get('model')) cfg.llmModel = q.get('model');
   cfg.llmUrl = cfg.llmUrl.replace(/\/+$/, '').replace(/\/v1$/, '');

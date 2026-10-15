@@ -11,4 +11,10 @@ window.RITSU_CONFIG = {
   // 暇つぶし行動(独り言・ダンス)の間隔[秒]
   idleMinSec: 25,
   idleMaxSec: 60,
+
+  // 描画の重さ(GPUが固まる/重いときに下げる)。URLに ?lite=1 で下記を全部軽量側にして試せる
+  pixelRatio: 1.5,         // 描画解像度の倍率上限。1未満で画面より粗く描いて軽くする
+  antialias: true,         // ふちのギザギザ補正
+  petals: 40,              // 桜の花びらの数
+  simpleMaterials: false,  // trueでVRMのトゥーンシェーダー/輪郭線をやめ、単純な材質で描く
 };

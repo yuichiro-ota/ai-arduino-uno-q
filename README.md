@@ -113,6 +113,7 @@ sudo reboot
 | `avatar/say` | 画面の律 → 入力ページ | `{"text":"...","emotion":"happy","motion":"wave","source":"llm/fallback/idle"}` |
 | `avatar/thinking` | 画面の律 → 入力ページ | `{"on":true}` 返事を考え中 |
 | `perception/person` | 深度カメラ処理 → 画面の律 | `{"present":true,"x":-0.3,"y":0.1,"z":1.2}` カメラ座標[m]（x:右、y:上、z:奥行き） |
+| `perception/status` | 深度カメラ処理 → 画面の律 | `{"alive":true,"present":false}` 2秒ごとの生存通知（画面右上の CAMERA ランプ: 緑=人を検出中、黄=人はいない、灰=通知なし） |
 
 - `chat/user` に応答するのは、URL に `?kiosk=1` を付けて開いた画面（キオスク表示）だけです。PC などで `index.html` を開いて確認しても、二重に返事をしません。
 - 深度カメラの処理は、UNO Q でも別のマシンでも、`192.168.3.80:1883` に `perception/person` を送れば律の目線が動きます。テスト: `docker exec ritsu-mqtt mosquitto_pub -t perception/person -m '{"present":true,"x":-0.5,"y":0,"z":1.2}'`

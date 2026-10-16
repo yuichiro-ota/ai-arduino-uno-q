@@ -5,6 +5,7 @@
  * MQTT (nginx の /mqtt 経由で mosquitto に接続)
  *   購読 chat/user          : {"text":"...","from":"..."}  入力ページ・画面のキーボードからの話しかけ (kioskのみ応答)
  *   購読 perception/person  : {"present":true,"x":-0.3,"y":0.1,"z":1.2}  人の位置 カメラ座標系[m] (視線追従)
+ *   購読 perception/status  : {"alive":true,"present":false}  人検出の生存通知(2秒ごと。CAMERAランプ)
  *   発行 avatar/say         : {"text":"...","emotion":"happy","motion":"wave","source":"llm|fallback|idle"}
  *   発行 avatar/thinking    : {"on":true}  返事を考え中
  * =========================================================================
@@ -183,6 +184,17 @@
   let gaze = null;            // {x,y} -1..1
   let gazeTimeout = 0;
 
+  // CAMERAランプ: 緑=人を検出中 / 黄=カメラは動いているが人はいない / 灰=人検出からの通知なし
+  const lampCam = document.getElementById('lamp-cam');
+  let camSeenAt = -Infinity, personSeenAt = -Infinity;
+  setInterval(() => {
+    const now = performance.now();
+    const alive = now - camSeenAt < 5000;
+    const person = now - personSeenAt < 1500;
+    lampCam.classList.toggle('on', alive && person);
+    lampCam.classList.toggle('idle', alive && !person);
+  }, 500);
+
   /* ===== 会話 & 暇つぶし ===== */
   const lampLlm = document.getElementById('lamp-llm');
   const brain = new RitsuBrain({
@@ -205,7 +217,8 @@
   if (mq) {
     mq.on('connect', () => {
       lampMqtt.classList.add('on');
-      mq.subscribe(RITSU_CFG.kiosk ? ['chat/user', 'perception/person'] : ['perception/person']);
+      const camTopics = ['perception/person', 'perception/status'];
+      mq.subscribe(RITSU_CFG.kiosk ? ['chat/user', ...camTopics] : camTopics);
     });
     mq.on('close', () => lampMqtt.classList.remove('on'));
     mq.on('message', (topic, payload) => {
@@ -213,7 +226,10 @@
       try { msg = JSON.parse(payload.toString()); } catch { return; }
       if (topic === 'chat/user' && typeof msg.text === 'string') {
         brain.chat(msg.text.slice(0, 200));
+      } else if (topic === 'perception/status') {
+        camSeenAt = performance.now();
       } else if (topic === 'perception/person' && msg.present) {
+        camSeenAt = personSeenAt = performance.now();
         // カメラ座標[m] → 視線オフセット(-1..1)。x:右+ y:上+ z:奥行き
         const z = Math.max(0.3, msg.z || 1.0);
         gaze = {

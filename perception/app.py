@@ -9,6 +9,7 @@ perception/app.py — Orbbec Gemini 335 人検出サービス
   {"present": true, "x": -0.31, "y": 0.05, "z": 1.42, "conf": 0.93}
   x: 右+ / y: 上+ / z: カメラからの距離 [m](カメラ座標系)
   見失ったら {"present": false}
+  あわせて `perception/status` に {"alive": true, "present": bool} を2秒ごとに送る(画面のCAMERAランプ用)
 
 環境変数:
   MQTT_HOST       MQTTブローカー (default 127.0.0.1)。開発PCからは UNO Q の 192.168.3.80
@@ -28,6 +29,7 @@ ROTATE = int(os.environ.get("CAMERA_ROTATE", "0"))
 FPS = float(os.environ.get("PERCEPTION_FPS", "15"))
 LOG_EVERY_SEC = 5   # 検出状況をログへ出す間隔
 NO_FRAME_RESTART_SEC = 10   # この秒数カメラから映像が来なければ開き直す
+STATUS_EVERY_SEC = 2        # perception/status を送る間隔
 
 # ---------------- MQTT ----------------
 mq = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="ritsu-perception")
@@ -37,6 +39,10 @@ mq.loop_start()
 
 def publish(payload: dict):
     mq.publish("perception/person", json.dumps(payload), qos=0)
+
+
+def publish_status(present: bool):
+    mq.publish("perception/status", json.dumps({"alive": True, "present": present}), qos=0)
 
 
 # ---------------- Orbbec Gemini 335 ----------------
@@ -105,6 +111,7 @@ def main():
     last_pub = 0.0
     last_log = 0.0
     last_frame = time.time()
+    last_status = 0.0
     miss = 0
     hits = 0
     while True:
@@ -160,6 +167,10 @@ def main():
             miss += 1
             if miss in (3, 30):  # 途切れ通知(連投しない)
                 publish({"present": False})
+
+        if now - last_status >= STATUS_EVERY_SEC:
+            publish_status(found is not None)
+            last_status = now
 
         if now - last_log >= LOG_EVERY_SEC:
             state = (f"person x={found['x']:+.2f} y={found['y']:+.2f} z={found['z']:.2f}m"

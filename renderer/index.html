@@ -57,6 +57,7 @@
   #status .lamp { display: flex; align-items: center; gap: 6px; }
   #status .dot  { width: 9px; height: 9px; border-radius: 50%; background: #ccc; }
   #status .on   { background: #57d9a3; box-shadow: 0 0 6px #57d9a3; }
+  #status .idle { background: #f2c14e; box-shadow: 0 0 6px #f2c14e; }
 </style>
 </head>
 <body>
@@ -72,6 +73,7 @@
 <div id="status">
   <div class="lamp"><div class="dot" id="lamp-llm"></div>LLM</div>
   <div class="lamp"><div class="dot" id="lamp-mqtt"></div>MQTT</div>
+  <div class="lamp"><div class="dot" id="lamp-cam"></div>CAMERA</div>
 </div>
 
 <script src="config.js"></script>

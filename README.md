@@ -117,6 +117,21 @@ sudo reboot
 - `chat/user` に応答するのは、URL に `?kiosk=1` を付けて開いた画面（キオスク表示）だけです。PC などで `index.html` を開いて確認しても、二重に返事をしません。
 - 深度カメラの処理は、UNO Q でも別のマシンでも、`192.168.3.80:1883` に `perception/person` を送れば律の目線が動きます。テスト: `docker exec ritsu-mqtt mosquitto_pub -t perception/person -m '{"present":true,"x":-0.5,"y":0,"z":1.2}'`
 
+## 6. 深度カメラ（Orbbec Gemini 335）
+
+`perception/` が人検出です。カラー映像から MediaPipe で顔を検出し、深度から3次元の位置を求めて、`perception/person` に送ります。律の画面とは別に起動します。
+
+```bash
+cd perception
+MQTT_HOST=127.0.0.1 PERCEPTION_FPS=8 docker compose up -d --build   # UNO Q 上で動かす場合
+docker compose up -d --build                                         # 開発PCから UNO Q (192.168.3.80) に送る場合
+docker logs -f ritsu-camera                                          # 検出状況が5秒ごとに出る
+```
+
+- 環境変数: `MQTT_HOST`（送り先）、`CAMERA_ROTATE`（カメラを縦置きしたとき 90/180/270）、`PERCEPTION_FPS`（1秒あたりの検出回数）
+- カメラから10秒映像が来なければ、自動で開き直します。
+- 開発PC（WSL）で使うときは、Windows 側で usbipd-win を使ってカメラを WSL に渡します（`usbipd bind --busid <BUSID>` → `usbipd attach --wsl --busid <BUSID>`）。
+
 ## デバッグ
 
 ブラウザのコンソールから次のように操作できます。

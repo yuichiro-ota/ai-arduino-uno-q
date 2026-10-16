@@ -1,0 +1,7 @@
+paho-mqtt>=2.0
+numpy<2
+# MediaPipeがopencv-contrib-pythonを要求するため、opencv-python-headlessを
+# 同時に入れない。numpy<2と互換性のある版へ固定してpipのバックトラックを防ぐ。
+opencv-contrib-python==4.11.0.86
+# 1.0以降では既存のmp.solutions APIが削除されているため固定する。
+mediapipe==0.10.21

@@ -4,4 +4,5 @@ numpy<2
 # 同時に入れない。numpy<2と互換性のある版へ固定してpipのバックトラックを防ぐ。
 opencv-contrib-python==4.11.0.86
 # 1.0以降では既存のmp.solutions APIが削除されているため固定する。
-mediapipe==0.10.21
+# 0.10.19以降は Linux arm64 (UNO Q) 向けの配布が無いため、x86_64 と共通で 0.10.18 にする。
+mediapipe==0.10.18

@@ -1,2 +1,4 @@
 # LiteLLM のAPIキー
 .env
+__pycache__/
+*.pyc

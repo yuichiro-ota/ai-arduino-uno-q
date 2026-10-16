@@ -3,7 +3,8 @@
 # 画面の向き・URL は環境変数で上書きできる: ROTATE=left URL=http://localhost:8080/ ./ritsu-kiosk.sh
 
 ROTATE="${ROTATE:-right}"                       # normal / left / right / inverted
-URL="${URL:-http://localhost:8080/?lite=1}"     # ?lite=1: Adreno 702 のGPUが固まらない軽量描画
+# ?lite=1: Adreno 702 のGPUが固まらない軽量描画 / ?kiosk=1: 入力ページ(MQTT)からの話しかけに応答する
+URL="${URL:-http://localhost:8080/?lite=1&kiosk=1}"
 
 sleep 3                                         # デスクトップの準備待ち
 xrandr --output DP-1 --rotate "$ROTATE"

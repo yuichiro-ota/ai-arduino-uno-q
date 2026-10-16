@@ -12,6 +12,21 @@ server {
         add_header Cache-Control "public, max-age=86400";
     }
 
+    # iPhone などから話しかける入力ページ
+    location = /remote {
+        try_files /remote.html =404;
+        add_header Cache-Control "no-cache";
+    }
+
+    # MQTT over WebSocket (画面の律・入力ページ用)
+    location /mqtt {
+        proxy_pass http://mosquitto:9001;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 1h;
+    }
+
     # LiteLLM への中継。APIキーはここで付与し、ブラウザには渡さない
     location /llm/ {
         proxy_pass ${LITELLM_URL}/;

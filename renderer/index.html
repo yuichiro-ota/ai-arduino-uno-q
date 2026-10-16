@@ -69,10 +69,12 @@
 
 <div id="status">
   <div class="lamp"><div class="dot" id="lamp-llm"></div>LLM</div>
+  <div class="lamp"><div class="dot" id="lamp-mqtt"></div>MQTT</div>
 </div>
 
 <script src="config.js"></script>
-<!-- three.js / three-vrm : オフライン運用時は js/vendor/ に配置して差し替え -->
+<!-- three.js / three-vrm / mqtt.js : オフライン運用時は js/vendor/ に配置して差し替え -->
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.3.5/dist/mqtt.min.js"></script>
 <script type="importmap">
 {
   "imports": {

@@ -16,6 +16,9 @@ const RITSU_CFG = (() => {
   if (q.get('pr')) cfg.pixelRatio = parseFloat(q.get('pr'));
   if (q.get('llm')) cfg.llmUrl = q.get('llm');
   if (q.get('model')) cfg.llmModel = q.get('model');
+  // ?kiosk=1 の画面だけが MQTT の chat/user に応答する(デバッグで開いた他の画面と二重に返事しない)
+  cfg.kiosk = q.get('kiosk') === '1';
+  cfg.mqttUrl = cfg.mqttUrl || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/mqtt`;
   cfg.llmUrl = cfg.llmUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
   return cfg;
 })();
@@ -50,34 +53,45 @@ const IDLE_MOTIONS_ONLY = ['nodSlow', 'lookAround', 'tiltR', 'stretch', 'happyBo
                            'guruguru', 'twirl'];
 
 const TAG_RE = /\[(emotion|motion):([a-zA-Z0-9_]+)\]/g;
+const QUEUE_MAX = 5;   // 返事中に届いた話しかけを順番待ちさせる上限
 const FALLBACK_REPLY = '[emotion:shy][motion:tiltL] ごめんなさい、少し考えごとをしていました。もう一度お願いできますか?';
 
 class RitsuBrain {
-  /** act({text, motion, emotion}) でキャラに反映。onStatus(ok) でLLMランプ更新 */
-  constructor({ act, onStatus }) {
+  /** act({text, motion, emotion, source}) でキャラに反映。onStatus(ok) でLLMランプ更新、
+   *  onThinking(on) で返事を考え中かどうかを通知 */
+  constructor({ act, onStatus, onThinking }) {
     this.act = act;
     this.onStatus = onStatus || (() => {});
+    this.onThinking = onThinking || (() => {});
     this.history = [];
+    this.queue = [];
     this.busy = false;
     this.lastInteraction = performance.now();
   }
 
   async chat(userText) {
     userText = userText.trim();
-    if (!userText || this.busy) return;
+    if (!userText) return;
+    if (this.busy) {
+      if (this.queue.length < QUEUE_MAX) this.queue.push(userText);
+      return;
+    }
     this.busy = true;
+    this.onThinking(true);
     this.lastInteraction = performance.now();
     this.act({ motion: 'listening' });
 
-    const reply = await this._complete(userText);
+    const { reply, ok } = await this._complete(userText);
     let emotion = 'happy', motion = 'talkGesture1';
     for (const [, kind, name] of reply.matchAll(TAG_RE)) {
       if (kind === 'emotion') emotion = name; else motion = name;
     }
     const text = reply.replace(TAG_RE, '').trim() || 'ふふっ。';
-    this.act({ text, motion, emotion });
+    this.act({ text, motion, emotion, source: ok ? 'llm' : 'fallback' });
     this.lastInteraction = performance.now();
     this.busy = false;
+    this.onThinking(false);
+    if (this.queue.length) this.chat(this.queue.shift());
   }
 
   async _complete(userText) {
@@ -98,12 +112,12 @@ class RitsuBrain {
     } catch (e) {
       console.warn('[brain] LLM error:', e);
       this.onStatus(false);
-      return FALLBACK_REPLY;
+      return { reply: FALLBACK_REPLY, ok: false };
     }
     this.history.push({ role: 'user', content: userText },
                       { role: 'assistant', content: reply });
     this.history = this.history.slice(-12);
-    return reply;
+    return { reply, ok: true };
   }
 
   /** 接続確認 (/v1/models) してランプに反映 */
@@ -125,7 +139,7 @@ class RitsuBrain {
         if (!this.busy && quietSec > RITSU_CFG.idleMinSec) {
           if (Math.random() < 0.5) {
             const [motion, emotion, text] = IDLE_LINES[Math.floor(Math.random() * IDLE_LINES.length)];
-            this.act({ text, motion, emotion });
+            this.act({ text, motion, emotion, source: 'idle' });
           } else {
             this.act({ motion: IDLE_MOTIONS_ONLY[Math.floor(Math.random() * IDLE_MOTIONS_ONLY.length)] });
           }

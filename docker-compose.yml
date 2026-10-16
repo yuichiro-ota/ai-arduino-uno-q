@@ -1,7 +1,9 @@
 # 律 (Ritsu) — Arduino UNO Q 版バーチャル看板娘 (VRM + three.js)
-#   renderer : 静的ファイル(HTML / three.js / VRM)を nginx で配信
-#              /llm/ を LiteLLM (CT201) へ中継し、APIキーはサーバー側で付与
-#   nginx:alpine は arm64 対応のため、ビルド不要でそのまま UNO Q 上で起動できる
+#   renderer  : 静的ファイル(HTML / three.js / VRM)を nginx で配信
+#               /llm/ を LiteLLM (CT201) へ中継し、APIキーはサーバー側で付与
+#               /mqtt を mosquitto の WebSocket へ中継
+#   mosquitto : MQTT。iPhone の入力ページ(/remote)・画面の律・深度カメラ処理をつなぐ
+#   どちらも arm64 対応イメージのため、ビルド不要でそのまま UNO Q 上で起動できる
 
 services:
   renderer:
@@ -14,3 +16,14 @@ services:
     volumes:
       - ./renderer:/usr/share/nginx/html:ro         # config.js / VRM は編集・差し替えしてリロードするだけ
       - ./nginx:/etc/nginx/templates:ro             # 起動時に .env の値を埋め込んで default.conf を生成
+    depends_on:
+      - mosquitto
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: ritsu-mqtt
+    restart: unless-stopped
+    ports:
+      - "1883:1883"                                 # 深度カメラ処理などのプログラム用
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro

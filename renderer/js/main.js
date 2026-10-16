@@ -1,6 +1,12 @@
 /* =========================================================================
- * main.js — シーン構築 / 会話UI / 字幕 / 口パク
+ * main.js — シーン構築 / 会話UI / 字幕 / 口パク / MQTT連携 / 視線追従
  *   会話・暇つぶし行動は brain.js (RitsuBrain) が担当し、act() 経由で反映する。
+ *
+ * MQTT (nginx の /mqtt 経由で mosquitto に接続)
+ *   購読 chat/user          : {"text":"...","from":"..."}  入力ページ・画面のキーボードからの話しかけ (kioskのみ応答)
+ *   購読 perception/person  : {"present":true,"x":-0.3,"y":0.1,"z":1.2}  人の位置 カメラ座標系[m] (視線追従)
+ *   発行 avatar/say         : {"text":"...","emotion":"happy","motion":"wave","source":"llm|fallback|idle"}
+ *   発行 avatar/thinking    : {"on":true}  返事を考え中
  * =========================================================================
  * ========================================================================= */
 
@@ -84,25 +90,64 @@
     talkLeft = text.length * 0.12;
   }
 
+  /* ===== MQTT ===== */
+  const lampMqtt = document.getElementById('lamp-mqtt');
+  const mq = window.mqtt ? mqtt.connect(RITSU_CFG.mqttUrl, { reconnectPeriod: 3000 }) : null;
+  const pub = (topic, payload) => { if (mq && mq.connected) mq.publish(topic, JSON.stringify(payload)); };
+  // 会話を MQTT で受け渡すのは kiosk 画面だけ。それ以外(デバッグ表示など)はその場で完結させる
+  const chatOverMqtt = () => RITSU_CFG.kiosk && mq && mq.connected;
+
+  let gaze = null;            // {x,y} -1..1
+  let gazeTimeout = 0;
+
   /* ===== 会話 & 暇つぶし ===== */
   const lampLlm = document.getElementById('lamp-llm');
   const brain = new RitsuBrain({
-    act({ text, motion, emotion }) {
+    act({ text, motion, emotion, source }) {
       if (emotion) mochiko.setEmotion(emotion);
       if (motion) player.play(motion);
-      if (text) showSubtitle(text);
+      if (text) {
+        showSubtitle(text);
+        if (RITSU_CFG.kiosk) pub('avatar/say', { text, emotion, motion, source });
+      }
     },
     onStatus: ok => lampLlm.classList.toggle('on', ok),
+    onThinking: on => { if (RITSU_CFG.kiosk) pub('avatar/thinking', { on }); },
   });
   brain.ping();
   brain.startIdle();
+
+  if (mq) {
+    mq.on('connect', () => {
+      lampMqtt.classList.add('on');
+      mq.subscribe(RITSU_CFG.kiosk ? ['chat/user', 'perception/person'] : ['perception/person']);
+    });
+    mq.on('close', () => lampMqtt.classList.remove('on'));
+    mq.on('message', (topic, payload) => {
+      let msg;
+      try { msg = JSON.parse(payload.toString()); } catch { return; }
+      if (topic === 'chat/user' && typeof msg.text === 'string') {
+        brain.chat(msg.text.slice(0, 200));
+      } else if (topic === 'perception/person' && msg.present) {
+        // カメラ座標[m] → 視線オフセット(-1..1)。x:右+ y:上+ z:奥行き
+        const z = Math.max(0.3, msg.z || 1.0);
+        gaze = {
+          x: THREE.MathUtils.clamp(-(msg.x / z) * 2.2, -1, 1),
+          y: THREE.MathUtils.clamp(-(msg.y / z) * 2.0 + 0.15, -1, 1),
+        };
+        gazeTimeout = 1.2;   // 検出が途切れたら1.2秒で正面に戻る
+      }
+    });
+  }
 
   const input = document.getElementById('chat-input');
   const send = () => {
     const text = input.value.trim();
     if (!text) return;
     input.value = '';
-    brain.chat(text);
+    // kiosk では画面のキーボード入力も MQTT に流し、入力ページの履歴にも出す
+    if (chatOverMqtt()) pub('chat/user', { text, from: 'screen' });
+    else brain.chat(text);
   };
   document.getElementById('chat-send').addEventListener('click', send);
   input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
@@ -114,6 +159,9 @@
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
 
+    // 視線タイムアウト
+    if (gazeTimeout > 0) { gazeTimeout -= dt; if (gazeTimeout <= 0) gaze = null; }
+
     // 口パク(字幕の文字数ぶん開閉し、減衰しつつ反映)
     if (talkLeft > 0) {
       talkLeft -= dt;
@@ -123,7 +171,7 @@
     visemeA *= 1 - Math.min(1, dt * 3);
 
     player.step(dt);
-    mochiko.update(dt, null);
+    mochiko.update(dt, gaze);
 
     // 花びら
     for (const m of petals) {

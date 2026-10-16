@@ -1,18 +1,21 @@
 # 律 (Ritsu) — Arduino UNO Q 版バーチャル看板娘 (VRM + three.js)
 
 VRMモデル「律」を Arduino UNO Q の HDMI 出力に表示する、表示専用の軽量構成です。
-UNO Q では nginx コンテナが静的ファイルを配信し、`/llm/` を LiteLLM（Proxmox CT201）へ中継します。APIキーは nginx 側で付けるので、ブラウザには渡りません。
+UNO Q では nginx コンテナが静的ファイルを配信し、`/llm/` を LiteLLM（Proxmox CT201）へ中継します。APIキーは nginx 側で付けるので、ブラウザには渡りません。iPhone などからの話しかけと深度カメラの人の位置は、MQTT（mosquitto）を通して画面の律に届けます。
 
 ```
-UNO Q (192.168.3.80)                              CT201 (192.168.3.16)     Ollama
-┌───────────────────────────────────────┐        ┌────────────────┐     ┌──────────────┐
-│ Chromium ──▶ nginx:8080  静的配信       │        │                │──▶ │ 192.168.3.3  │
-│ (kiosk)      └ /llm/* ──(+APIキー)──────┼──────▶ │ LiteLLM :4000  │     │ 192.168.3.15 │
-└───────────────────────────────────────┘        └────────────────┘     └──────────────┘
+                 UNO Q (192.168.3.80)                           CT201 (192.168.3.16)
+iPhone ─/remote─▶ nginx:8080 ─ /llm/* (+APIキー) ─────────────▶ LiteLLM :4000 ─▶ Ollama
+(Safari)  ◀─────┐   └ /mqtt ──▶ mosquitto ◀─┐
+                └────────── chat/user, avatar/say ─────────┐
+                                            │                │
+深度カメラ処理 ── perception/person :1883 ──┘      Chromium(kiosk) = 画面の律
 ```
 
 - 48種類のモーション、8種類の表情、自動まばたき、呼吸、髪の揺れ（スプリングボーン）
 - チャット入力 → LLM の返答を字幕で表示し、返答の `[emotion:x][motion:y]` タグで表情とモーションを付ける。口パクあり（音声なし）
+- **iPhone などから話しかけられる**: `http://192.168.3.80:8080/remote` を開くと、入力ページから画面の律に話しかけ、返事を受け取れる（複数台で同時に使える）
+- 深度カメラの人の位置（`perception/person`）を受け取ると、律の目線がその人を追う
 - 一定間隔で独り言やダンスをする暇つぶし行動
 - `renderer/models/avatar.vrm` を差し替えるだけで別の VRM（0.x / 1.0）に変えられる。ファイルが無い場合は内蔵モデルで起動する
 
@@ -20,9 +23,12 @@ UNO Q (192.168.3.80)                              CT201 (192.168.3.16)     Ollam
 
 | パス | 内容 |
 |---|---|
-| `docker-compose.yml` | `nginx:alpine`（arm64 対応）。ビルド不要 |
+| `docker-compose.yml` | `nginx:alpine` と `eclipse-mosquitto:2`（どちらも arm64 対応）。ビルド不要 |
+| `mosquitto/mosquitto.conf` | MQTT。WebSocket（9001、nginx の `/mqtt` 経由）と、プログラム用の 1883 番。LAN 内専用で認証なし |
 | `.env` | **LiteLLM の接続先とAPIキー**（`.env.example` からコピー。配信されない場所にある） |
-| `nginx/default.conf.template` | 起動時に `.env` の値を埋め込む nginx 設定。`/llm/` を LiteLLM に中継してキーを付ける |
+| `nginx/default.conf.template` | 起動時に `.env` の値を埋め込む nginx 設定。`/llm/` を LiteLLM に中継してキーを付ける。`/mqtt` を mosquitto に中継、`/remote` で入力ページを返す |
+| `renderer/remote.html` | iPhone などから話しかける入力ページ |
+| `kiosk/ritsu-kiosk.sh` | キオスク表示の起動スクリプト |
 | `renderer/config.js` | モデル名（`chat` / `chat-large`）、タイムアウト、暇つぶしの間隔 |
 | `renderer/index.html` | 画面（three.js / three-vrm は jsdelivr CDN から読み込み） |
 | `renderer/js/brain.js` | LLM 呼び出し、タグ解析、暇つぶし行動 |
@@ -98,6 +104,18 @@ sudo reboot
 - **GPU（Adreno 702）**: 標準の描画のままだと GPU が固まり（`dmesg` に `gpu lockup`）、画面が消えます。`?lite=1` で回避しています。どこまで軽くするかは `renderer/config.js` の描画設定で調整します。
 - **画面が映らない、または映ってすぐ消える**: Xfce のディスプレイ設定が壊れている場合があります。`~/.config/xfce4/xfconf/xfce-perchannel-xml/displays.xml` を退避して `sudo systemctl restart lightdm` を実行してください。
 - **SSH から画面を操作するとき**: `DISPLAY=:0` を付けます。MobaXterm などで X11 転送が有効だと、Windows 側に表示されます。
+
+## 5. MQTT トピック
+
+| トピック | 送る側 → 受け取る側 | 内容 |
+|---|---|---|
+| `chat/user` | 入力ページ・画面のキーボード → 画面の律 | `{"text":"...","from":"..."}` |
+| `avatar/say` | 画面の律 → 入力ページ | `{"text":"...","emotion":"happy","motion":"wave","source":"llm/fallback/idle"}` |
+| `avatar/thinking` | 画面の律 → 入力ページ | `{"on":true}` 返事を考え中 |
+| `perception/person` | 深度カメラ処理 → 画面の律 | `{"present":true,"x":-0.3,"y":0.1,"z":1.2}` カメラ座標[m]（x:右、y:上、z:奥行き） |
+
+- `chat/user` に応答するのは、URL に `?kiosk=1` を付けて開いた画面（キオスク表示）だけです。PC などで `index.html` を開いて確認しても、二重に返事をしません。
+- 深度カメラの処理は、UNO Q でも別のマシンでも、`192.168.3.80:1883` に `perception/person` を送れば律の目線が動きます。テスト: `docker exec ritsu-mqtt mosquitto_pub -t perception/person -m '{"present":true,"x":-0.5,"y":0,"z":1.2}'`
 
 ## デバッグ
 

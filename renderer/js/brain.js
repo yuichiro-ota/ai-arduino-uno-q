@@ -7,13 +7,17 @@
 const RITSU_CFG = (() => {
   const cfg = Object.assign({
     llmUrl: '/llm', llmModel: 'chat',
-    llmTimeoutSec: 30, idleMinSec: 25, idleMaxSec: 60,
+    llmTimeoutSec: 30, idleMinSec: 25, idleMaxSec: 60, peekMinSec: 60, peekMaxSec: 120,
     pixelRatio: 1.5, antialias: true, petals: 40, simpleMaterials: false,
   }, window.RITSU_CONFIG || {});
   const q = new URLSearchParams(location.search);
   // ?lite=1 で描画を最軽量に(GPUが弱い/不安定な環境の切り分け用)
   if (q.get('lite') === '1') Object.assign(cfg, { pixelRatio: 0.75, antialias: false, petals: 0, simpleMaterials: true });
+  // 描画設定を1項目ずつ切り替えて試す: ?pr=1 / ?aa=0 / ?pet=0 / ?sm=1
   if (q.get('pr')) cfg.pixelRatio = parseFloat(q.get('pr'));
+  if (q.get('aa')) cfg.antialias = q.get('aa') === '1';
+  if (q.get('pet')) cfg.petals = parseInt(q.get('pet'), 10) || 0;
+  if (q.get('sm')) cfg.simpleMaterials = q.get('sm') === '1';
   if (q.get('llm')) cfg.llmUrl = q.get('llm');
   if (q.get('model')) cfg.llmModel = q.get('model');
   // ?kiosk=1 の画面だけが MQTT の chat/user に応答する(デバッグで開いた他の画面と二重に返事しない)
@@ -48,6 +52,19 @@ const IDLE_LINES = [
   ['kyun',        'shy',     'きゅんっ……なんて、冗談ですよ。ふふ。'],
   ['nekoPose',    'happy',   'にゃん……猫さんの真似、してみました。'],
 ];
+const PEEK_LINES = [
+  'じーっ……。そこに、どなたかいらっしゃいますか?',
+  'ふふっ、ちゃんと見えていますよ。',
+  'あれ?今、目が合いましたね。',
+  '画面の向こうって、どうなっているんでしょう……',
+];
+const NOTICE_LINES = [
+  '……?今、何か聞こえましたか?',
+  'あら……?気のせい、でしょうか。',
+  '……?誰か、いらっしゃいました?',
+  '今の音……なんでしょう?',
+];
+const NOTICE_CHANCE = 0.25;  // 暇つぶし1回あたり、物音に振り向く確率
 const IDLE_MOTIONS_ONLY = ['nodSlow', 'lookAround', 'tiltR', 'stretch', 'happyBounce',
                            'danceC', 'sleepyNod', 'rhythmSway', 'pikoJump', 'mojimoji',
                            'guruguru', 'twirl'];
@@ -67,6 +84,8 @@ class RitsuBrain {
     this.queue = [];
     this.busy = false;
     this.lastInteraction = performance.now();
+    this.lastPeek = performance.now();
+    this.lastChat = -Infinity;   // 最後に話しかけられた時刻(会話中のカメラ寄り用)
   }
 
   async chat(userText) {
@@ -77,6 +96,7 @@ class RitsuBrain {
       return;
     }
     this.busy = true;
+    this.lastChat = performance.now();
     this.onThinking(true);
     this.lastInteraction = performance.now();
     this.act({ motion: 'listening' });
@@ -88,7 +108,7 @@ class RitsuBrain {
     }
     const text = reply.replace(TAG_RE, '').trim() || 'ふふっ。';
     this.act({ text, motion, emotion, source: ok ? 'llm' : 'fallback' });
-    this.lastInteraction = performance.now();
+    this.lastInteraction = this.lastChat = performance.now();
     this.busy = false;
     this.onThinking(false);
     if (this.queue.length) this.chat(this.queue.shift());
@@ -136,8 +156,14 @@ class RitsuBrain {
       const sec = RITSU_CFG.idleMinSec + Math.random() * (RITSU_CFG.idleMaxSec - RITSU_CFG.idleMinSec);
       setTimeout(() => {
         const quietSec = (performance.now() - this.lastInteraction) / 1000;
-        if (!this.busy && quietSec > RITSU_CFG.idleMinSec) {
-          if (Math.random() < 0.5) {
+        const sincePeek = (performance.now() - this.lastPeek) / 1000;
+        if (!this.busy && quietSec > RITSU_CFG.idleMinSec && sincePeek > 8) {   // のぞき込み直後は控える
+          if (Math.random() < NOTICE_CHANCE) {
+            // 半分は無言で振り向くだけ(毎回しゃべると不自然なため)
+            this.act({ motion: Math.random() < 0.5 ? 'noticeL' : 'noticeR', emotion: 'surprised',
+                       text: Math.random() < 0.5 ? NOTICE_LINES[Math.floor(Math.random() * NOTICE_LINES.length)] : null,
+                       source: 'idle' });
+          } else if (Math.random() < 0.5) {
             const [motion, emotion, text] = IDLE_LINES[Math.floor(Math.random() * IDLE_LINES.length)];
             this.act({ text, motion, emotion, source: 'idle' });
           } else {
@@ -148,6 +174,22 @@ class RitsuBrain {
       }, sec * 1000);
     };
     schedule();
+    this._startPeek();
+  }
+
+  /** 会話が無い間、peekMinSec〜peekMaxSec 秒に1回のぞき込む(話しかけられたら数え直し) */
+  _startPeek() {
+    const gap = () => RITSU_CFG.peekMinSec + Math.random() * (RITSU_CFG.peekMaxSec - RITSU_CFG.peekMinSec);
+    let next = gap();
+    setInterval(() => {
+      const now = performance.now();
+      const since = (now - Math.max(this.lastInteraction, this.lastPeek)) / 1000;
+      if (this.busy || since < next) return;
+      this.lastPeek = now;
+      next = gap();
+      this.act({ text: PEEK_LINES[Math.floor(Math.random() * PEEK_LINES.length)],
+                 motion: 'peek', emotion: 'surprised', source: 'idle' });
+    }, 1000);
   }
 }
 window.RitsuBrain = RitsuBrain;

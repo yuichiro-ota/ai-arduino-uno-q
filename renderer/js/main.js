@@ -73,7 +73,35 @@
      models/avatar.vrm があればVRM、無ければ内蔵モデル(もちこ)を使用 */
   const mochiko = await createAvatar(scene);
   const player = new MotionPlayer(mochiko);
-  mochiko.setEmotion('happy');
+  const DEFAULT_EMOTION = 'happy';
+  mochiko.setEmotion(DEFAULT_EMOTION);
+  // 表情はモーションと字幕が終わったらいつもの表情に戻す(驚いた顔のまま残らないように)
+  // のぞき込みはカメラが戻った時点(stepCamera から resetEmotionAfterCamera を呼ぶ)、
+  // 振り向きはモーション(首の戻り)が終わった時点で戻す
+  const CAMERA_MOTIONS = ['peek'];
+  const MOTION_END_MOTIONS = ['noticeL', 'noticeR'];
+  let emotionTimer = null;
+  let emotionUntilCamera = false;
+  function resetEmotionAfterCamera() {
+    if (!emotionUntilCamera) return;
+    emotionUntilCamera = false;
+    mochiko.setEmotion(DEFAULT_EMOTION);
+  }
+  function setEmotionFor(emotion, motion, text) {
+    mochiko.setEmotion(emotion);
+    clearTimeout(emotionTimer);
+    emotionUntilCamera = false;
+    if (emotion === DEFAULT_EMOTION) return;
+    if (CAMERA_MOTIONS.includes(motion)) { emotionUntilCamera = true; return; }
+    if (MOTION_END_MOTIONS.includes(motion)) {
+      emotionTimer = setTimeout(() => mochiko.setEmotion(DEFAULT_EMOTION), MOTIONS[motion].dur * 1000);
+      return;
+    }
+    const motionSec = (MOTIONS[motion] && MOTIONS[motion].dur) || 0;
+    const textSec = text ? Math.max(3.5, text.length * 0.22) : 0;
+    emotionTimer = setTimeout(() => mochiko.setEmotion(DEFAULT_EMOTION),
+                              Math.max(2.5, motionSec, textSec) * 1000);
+  }
 
   /* ===== 字幕 + 口パク =====
      音声は無いので、字幕表示中は文字数ぶん口をパクパクさせる */
@@ -90,6 +118,61 @@
     talkLeft = text.length * 0.12;
   }
 
+  /* ===== カメラワーク =====
+   *  全身(既定) → 会話中は胸から上へ寄る → その上に「振り向き」の振れと「のぞき込み」の寄りを重ねる */
+  const camHome = camera.position.clone();
+  const lookHome = new THREE.Vector3(0, 1.05, 0);
+  const TALK_HOLD = 20;       // 最後の会話からこの秒数は寄ったまま
+  const PEEK_IN = 0.9, PEEK_HOLD = 2.6, PEEK_OUT = 1.1;
+  const PAN_DUR = 3.8;        // motions.js の noticeL/R と同じ長さ
+  const headRest = new THREE.Vector3(0, 1.45, 0);   // 立ち姿の頭の位置(会話の寄り先の基準)
+  let headRestReady = false;
+  let talkK = 0;              // 0:全身 .. 1:会話の寄り
+  let peekT = -1;             // -1: のぞき込み中でない
+  let panT = -1, panDir = 0;  // 振り向き中のカメラの振れ
+  const v = { basePos: new THREE.Vector3(), baseLook: new THREE.Vector3(),
+              talkPos: new THREE.Vector3(), talkLook: new THREE.Vector3(),
+              head: new THREE.Vector3(), near: new THREE.Vector3(), look: new THREE.Vector3() };
+  const headPos = out => mochiko.headWorldPosition ? mochiko.headWorldPosition(out) : out.set(0, 1.45, 0);
+  const envelope = (t, tin, thold, tout) =>
+    t < tin ? ease(t / tin) : t < tin + thold ? 1 : t < tin + thold + tout ? 1 - ease((t - tin - thold) / tout) : -1;
+
+  function startPeek() { if (peekT < 0) peekT = 0; }
+  function startPan(dir) { panT = 0; panDir = dir; }
+
+  function stepCamera(dt, now) {
+    if (!headRestReady) { headPos(headRest); headRestReady = true; }
+
+    // ① 会話中は胸から上へ寄る
+    const talking = brain.busy || (now - brain.lastChat) / 1000 < TALK_HOLD;
+    talkK += ((talking ? 1 : 0) - talkK) * Math.min(1, dt * 1.2);
+    v.talkPos.set(headRest.x, headRest.y - 0.1, headRest.z + 1.3);
+    v.talkLook.set(headRest.x, headRest.y - 0.16, headRest.z);
+    v.basePos.lerpVectors(camHome, v.talkPos, talkK);
+    v.baseLook.lerpVectors(lookHome, v.talkLook, talkK);
+
+    // ② 物音に振り向く: 律の向く側へカメラも少し振れる
+    if (panT >= 0) {
+      panT += dt;
+      const k = envelope(panT, PAN_DUR * 0.3, PAN_DUR * 0.32, PAN_DUR * 0.25);
+      if (k < 0) panT = -1;
+      else { v.baseLook.x += panDir * 0.18 * k; v.basePos.x += panDir * 0.04 * k; }
+    }
+
+    // のぞき込み: 前かがみで動く頭を毎フレーム追い、目元の正面 0.55m まで寄る
+    let pk = 0;
+    if (peekT >= 0) {
+      peekT += dt;
+      pk = envelope(peekT, PEEK_IN, PEEK_HOLD, PEEK_OUT);
+      if (pk < 0) { peekT = -1; pk = 0; resetEmotionAfterCamera(); }
+    }
+    headPos(v.head).y += 0.03;
+    v.near.set(v.head.x, v.head.y, v.head.z + 0.55);
+    camera.position.lerpVectors(v.basePos, v.near, pk);
+    camera.lookAt(v.look.lerpVectors(v.baseLook, v.head, pk));
+    mochiko.lookOverride = pk > 0.2 ? camera.position : null;
+  }
+
   /* ===== MQTT ===== */
   const lampMqtt = document.getElementById('lamp-mqtt');
   const mq = window.mqtt ? mqtt.connect(RITSU_CFG.mqttUrl, { reconnectPeriod: 3000 }) : null;
@@ -104,8 +187,10 @@
   const lampLlm = document.getElementById('lamp-llm');
   const brain = new RitsuBrain({
     act({ text, motion, emotion, source }) {
-      if (emotion) mochiko.setEmotion(emotion);
+      if (emotion) setEmotionFor(emotion, motion, text);
       if (motion) player.play(motion);
+      if (motion === 'peek') startPeek();
+      if (motion === 'noticeL' || motion === 'noticeR') startPan(motion === 'noticeR' ? 1 : -1);
       if (text) {
         showSubtitle(text);
         if (RITSU_CFG.kiosk) pub('avatar/say', { text, emotion, motion, source });
@@ -172,6 +257,7 @@
 
     player.step(dt);
     mochiko.update(dt, gaze);
+    stepCamera(dt, now);
 
     // 花びら
     for (const m of petals) {
@@ -192,5 +278,9 @@
   });
 
   // デバッグ:コンソールから MOCHI.play('wave') などで再生可能
-  window.RITSU = window.MOCHI = { play: n => player.play(n), list: () => player.list(), ch: mochiko, brain };
+  window.RITSU = window.MOCHI = {
+    play: n => player.play(n), list: () => player.list(), ch: mochiko, brain,
+    peek: () => brain.act({ motion: 'peek', emotion: 'surprised' }),
+    notice: (dir = 1) => brain.act({ motion: dir > 0 ? 'noticeR' : 'noticeL', emotion: 'surprised' }),
+  };
 })();

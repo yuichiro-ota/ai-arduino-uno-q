@@ -41,7 +41,9 @@
     font-size: 18px; color: var(--ink); background: rgba(255,255,255,0.9); outline: none;
   }
   #chatbar input:focus { border-color: var(--accent); }
+  #chatbar input { min-width: 0; }
   #chatbar button {
+    flex-shrink: 0; white-space: nowrap;
     padding: 0 26px; border: none; border-radius: 999px; background: var(--accent);
     color: white; font-size: 18px; font-weight: 700; cursor: pointer;
   }

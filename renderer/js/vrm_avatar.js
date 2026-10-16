@@ -39,6 +39,12 @@ class VRMAvatar {
     });
   }
 
+  /** 頭のワールド座標(カメラ寄り用) */
+  headWorldPosition(out = new THREE.Vector3()) {
+    const head = this.vrm.humanoid?.getRawBoneNode('head');
+    return head ? head.getWorldPosition(out) : out.set(0, 1.45, 0);
+  }
+
   constructor(vrm, scene) {
     this.vrm = vrm;
 
@@ -192,7 +198,8 @@ class VRMAvatar {
       p.eyeY *= 1 - Math.min(1, dt * 2);
     }
     // 眼球:モデル正面1.5m先の仮想ターゲットを動かす
-    this.lookTarget.position.set(p.eyeX * 1.2, 1.4 + p.eyeY * 0.7, 1.6);
+    if (this.lookOverride) this.lookTarget.position.copy(this.lookOverride);  // のぞき込み中はカメラを見る
+    else this.lookTarget.position.set(p.eyeX * 1.2, 1.4 + p.eyeY * 0.7, 1.6);
 
     /* ---- アイドル(呼吸・体の揺れ) ---- */
     const breathe = Math.sin(t * 1.6) * 0.006;

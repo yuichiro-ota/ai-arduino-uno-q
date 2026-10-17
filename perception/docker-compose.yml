@@ -10,7 +10,9 @@ services:
     network_mode: host
     volumes:
       - /dev/bus/usb:/dev/bus/usb
+      - ../renderer/debug:/app/debug          # DEBUG_SNAPSHOT=1 のとき camera.jpg を保存(:8080/debug/camera.jpg)
     environment:
       - MQTT_HOST=${MQTT_HOST:-192.168.3.80}
       - CAMERA_ROTATE=${CAMERA_ROTATE:-0}   # カメラを縦置きしたとき 90/180/270
       - PERCEPTION_FPS=${PERCEPTION_FPS:-15}
+      - DEBUG_SNAPSHOT=${DEBUG_SNAPSHOT:-0}

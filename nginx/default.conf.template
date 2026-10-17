@@ -12,6 +12,11 @@ server {
         add_header Cache-Control "public, max-age=86400";
     }
 
+    # 人検出の確認用画像 (perception の DEBUG_SNAPSHOT=1 で更新される)
+    location /debug/ {
+        add_header Cache-Control "no-store";
+    }
+
     # iPhone などから話しかける入力ページ
     location = /remote {
         try_files /remote.html =404;

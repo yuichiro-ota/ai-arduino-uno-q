@@ -15,6 +15,8 @@ perception/app.py — Orbbec Gemini 335 人検出サービス
   MQTT_HOST       MQTTブローカー (default 127.0.0.1)。開発PCからは UNO Q の 192.168.3.80
   CAMERA_ROTATE   0/90/180/270 — カメラを縦置きする場合の回転補正
   PERCEPTION_FPS  配信頻度 [回/秒] (default 15)
+  DEBUG_SNAPSHOT  1 にすると5秒ごとにカメラ画像(検出枠つき)を debug/camera.jpg に保存する
+                  (docker-compose で renderer/debug にマウント → http://<UNO Q>:8080/debug/camera.jpg で見られる)
 """
 import json
 import os
@@ -30,6 +32,8 @@ FPS = float(os.environ.get("PERCEPTION_FPS", "15"))
 LOG_EVERY_SEC = 5   # 検出状況をログへ出す間隔
 NO_FRAME_RESTART_SEC = 10   # この秒数カメラから映像が来なければ開き直す
 STATUS_EVERY_SEC = 2        # perception/status を送る間隔
+DEBUG_SNAPSHOT = os.environ.get("DEBUG_SNAPSHOT", "0") == "1"
+SNAPSHOT_PATH = "/app/debug/camera.jpg"
 
 # ---------------- MQTT ----------------
 mq = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="ritsu-perception")
@@ -100,6 +104,25 @@ def to_sensor_uv(u_v, v_v, w, h):
     return u_v, v_v
 
 
+def save_snapshot(view, box, found, depth, scale):
+    """検出の様子を確認するための画像(左:カラー+顔枠 / 右:深度)を保存する"""
+    img = cv2.cvtColor(view, cv2.COLOR_RGB2BGR)
+    if box:
+        x, y, w, h = box
+        cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0) if found else (0, 0, 255), 2)
+    label = f"z={found['z']:.2f}m" if found else ("face, no depth" if box else "no face")
+    cv2.putText(img, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+    d = rotate_img(depth, ROTATE).astype(np.float32) * scale
+    d = np.clip(d / 4000.0 * 255.0, 0, 255).astype(np.uint8)    # 0〜4m を濃淡に
+    d = cv2.applyColorMap(d, cv2.COLORMAP_JET)
+    d[rotate_img(depth, ROTATE) == 0] = 0                          # 深度なしは黒
+    d = cv2.resize(d, (img.shape[1], img.shape[0]))
+    os.makedirs(os.path.dirname(SNAPSHOT_PATH), exist_ok=True)
+    tmp = SNAPSHOT_PATH + ".tmp.jpg"
+    cv2.imwrite(tmp, np.hstack([img, d]))
+    os.replace(tmp, SNAPSHOT_PATH)
+
+
 def main():
     import mediapipe as mp
     detector = mp.solutions.face_detection.FaceDetection(
@@ -114,6 +137,9 @@ def main():
     last_status = 0.0
     miss = 0
     hits = 0
+    faces = 0        # 顔は見つかった回数(深度が取れずに捨てた分も含む)
+    no_depth = 0     # 顔はあったが深度が取れなかった回数
+    last_z = None
     while True:
         fs = pipeline.wait_for_frames(200)
         cf = fs.get_color_frame() if fs else None
@@ -135,12 +161,15 @@ def main():
         result = detector.process(view)
 
         found = None
+        box = None
         if result.detections:
+            faces += 1
             # 最も大きい(=近い)顔を採用
             det = max(result.detections,
                       key=lambda d: d.location_data.relative_bounding_box.width)
             bb = det.location_data.relative_bounding_box
             vh, vw = view.shape[:2]
+            box = (int(bb.xmin * vw), int(bb.ymin * vh), int(bb.width * vw), int(bb.height * vh))
             h, w = color.shape[:2]
             u, v = to_sensor_uv(int((bb.xmin + bb.width / 2) * vw),
                                 int((bb.ymin + bb.height / 3) * vh),  # 目の高さあたり
@@ -151,8 +180,11 @@ def main():
             # 顔中心周辺 5x5 の深度中央値 [mm] → [m]
             patch = depth[v - 2:v + 3, u - 2:u + 3].astype(np.float32) * scale
             valid = patch[(patch > 200) & (patch < 6000)]
-            if valid.size:
+            if not valid.size:
+                no_depth += 1
+            else:
                 z = float(np.median(valid)) / 1000.0
+                last_z = z
                 found = {"present": True,
                          "x": round((u - cx) / fx * z, 3),
                          "y": round(-(v - cy) / fy * z, 3),  # 画像下+ → 上+ に反転
@@ -175,9 +207,11 @@ def main():
         if now - last_log >= LOG_EVERY_SEC:
             state = (f"person x={found['x']:+.2f} y={found['y']:+.2f} z={found['z']:.2f}m"
                      if found else "no person")
-            print(f"[perception] {state} ({hits} hits / {LOG_EVERY_SEC}s, "
-                  f"mqtt {'ok' if mq.is_connected() else 'disconnected'})")
-            last_log, hits = now, 0
+            print(f"[perception] {state} ({hits} hits, {faces} faces, {no_depth} no-depth / "
+                  f"{LOG_EVERY_SEC}s, mqtt {'ok' if mq.is_connected() else 'disconnected'})")
+            if DEBUG_SNAPSHOT:
+                save_snapshot(view, box, found, depth, scale)
+            last_log, hits, faces, no_depth = now, 0, 0, 0
 
 
 if __name__ == "__main__":

@@ -20,9 +20,8 @@ const RITSU_CFG = (() => {
   if (q.get('sm')) cfg.simpleMaterials = q.get('sm') === '1';
   if (q.get('llm')) cfg.llmUrl = q.get('llm');
   if (q.get('model')) cfg.llmModel = q.get('model');
-  // ?kiosk=1 の画面だけが MQTT の chat/user に応答する(デバッグで開いた他の画面と二重に返事しない)
+  // ?kiosk=1 の画面だけが ROS 2 の /ritsu/chat_user に応答する(デバッグで開いた他の画面と二重に返事しない)
   cfg.kiosk = q.get('kiosk') === '1';
-  cfg.mqttUrl = cfg.mqttUrl || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/mqtt`;
   cfg.llmUrl = cfg.llmUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
   return cfg;
 })();

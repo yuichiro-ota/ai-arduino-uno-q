@@ -1,0 +1,3 @@
+# numpy と ROS 2 本体(rclpy 等)は ros:jazzy のシステムのものを使う
+# 顔検出は OpenCV 内蔵の YuNet (cv2.FaceDetectorYN)。MediaPipe は Linux arm64 版で顔を検出できなかったため使わない
+opencv-python-headless==4.11.0.86

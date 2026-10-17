@@ -23,9 +23,9 @@ server {
         add_header Cache-Control "no-cache";
     }
 
-    # MQTT over WebSocket (画面の律・入力ページ用)
-    location /mqtt {
-        proxy_pass http://mosquitto:9001;
+    # rosbridge (ROS 2 ⇔ ブラウザ)。rosbridge はホストネットワークで 9090 番
+    location /rosbridge {
+        proxy_pass http://host.docker.internal:9090/;   # rosbridge は / でしか受け付けないためパスを外す
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";

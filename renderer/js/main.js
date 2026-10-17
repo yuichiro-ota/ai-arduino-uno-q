@@ -1,14 +1,15 @@
 /* =========================================================================
- * main.js — シーン構築 / 会話UI / 字幕 / 口パク / MQTT連携 / 視線追従
+ * main.js — シーン構築 / 会話UI / 字幕 / 口パク / ROS 2連携 / 視線追従
  *   会話・暇つぶし行動は brain.js (RitsuBrain) が担当し、act() 経由で反映する。
  *
- * MQTT (nginx の /mqtt 経由で mosquitto に接続)
- *   購読 chat/user          : {"text":"...","from":"..."}  入力ページ・画面のキーボードからの話しかけ (kioskのみ応答)
- *   購読 perception/person  : {"present":true,"x":-0.3,"y":0.1,"z":1.2}  人の位置 カメラ座標系[m] (視線追従)
- *   購読 perception/status  : {"alive":true,"present":false}  人検出の生存通知(2秒ごと。CAMERAランプ)
- *   購読 perception/tilt    : {"roll":12.3,"pitch":-1.0}  カメラ(IMU)の傾き[度]。左右に大きく傾くと「おっとっと」
- *   発行 avatar/say         : {"text":"...","emotion":"happy","motion":"wave","source":"llm|fallback|idle"}
- *   発行 avatar/thinking    : {"on":true}  返事を考え中
+ * ROS 2 (nginx の /rosbridge 経由で rosbridge に接続、ros.js)
+ *   購読 /ritsu/chat_user      std_msgs/String  JSON {"text":"...","from":"..."}  入力ページ・画面のキーボード (kioskのみ応答)
+ *   購読 /ritsu/person         geometry_msgs/PointStamped  顔の位置 [m] 光学座標系(x:右 / y:下 / z:前) (視線追従)
+ *   購読 /ritsu/person_present std_msgs/Bool
+ *   購読 /ritsu/camera_alive   std_msgs/Bool    人検出の生存通知(2秒ごと。CAMERAランプ)
+ *   購読 /ritsu/tilt           geometry_msgs/Vector3  カメラの傾き[度] x=roll。左右に大きく傾くと「おっとっと」
+ *   発行 /ritsu/say            std_msgs/String  JSON {"text":"...","emotion":"happy","motion":"wave","source":"llm|fallback|idle"}
+ *   発行 /ritsu/thinking       std_msgs/Bool    返事を考え中
  * =========================================================================
  * ========================================================================= */
 
@@ -175,12 +176,13 @@
     mochiko.lookOverride = pk > 0.2 ? camera.position : null;
   }
 
-  /* ===== MQTT ===== */
-  const lampMqtt = document.getElementById('lamp-mqtt');
-  const mq = window.mqtt ? mqtt.connect(RITSU_CFG.mqttUrl, { reconnectPeriod: 3000 }) : null;
-  const pub = (topic, payload) => { if (mq && mq.connected) mq.publish(topic, JSON.stringify(payload)); };
-  // 会話を MQTT で受け渡すのは kiosk 画面だけ。それ以外(デバッグ表示など)はその場で完結させる
-  const chatOverMqtt = () => RITSU_CFG.kiosk && mq && mq.connected;
+  /* ===== ROS 2 (rosbridge) ===== */
+  const lampRos = document.getElementById('lamp-ros');
+  const ros = window.ROSLIB ? new RitsuRos(null, ok => lampRos.classList.toggle('on', ok)) : null;
+  const pubJson = (name, obj) => ros && ros.pub(name, 'std_msgs/String', { data: JSON.stringify(obj) });
+  const pubBool = (name, value) => ros && ros.pub(name, 'std_msgs/Bool', { data: value });
+  // 会話を ROS 2 で受け渡すのは kiosk 画面だけ。それ以外(デバッグ表示など)はその場で完結させる
+  const chatOverRos = () => RITSU_CFG.kiosk && ros && ros.connected;
 
   let gaze = null;            // {x,y} -1..1
   let gazeTimeout = 0;
@@ -221,41 +223,35 @@
       if (motion === 'noticeL' || motion === 'noticeR') startPan(motion === 'noticeR' ? 1 : -1);
       if (text) {
         showSubtitle(text);
-        if (RITSU_CFG.kiosk) pub('avatar/say', { text, emotion, motion, source });
+        if (RITSU_CFG.kiosk) pubJson('/ritsu/say', { text, emotion, motion, source });
       }
     },
     onStatus: ok => lampLlm.classList.toggle('on', ok),
-    onThinking: on => { if (RITSU_CFG.kiosk) pub('avatar/thinking', { on }); },
+    onThinking: on => { if (RITSU_CFG.kiosk) pubBool('/ritsu/thinking', on); },
   });
   brain.ping();
   brain.startIdle();
 
-  if (mq) {
-    mq.on('connect', () => {
-      lampMqtt.classList.add('on');
-      const camTopics = ['perception/person', 'perception/status', 'perception/tilt'];
-      mq.subscribe(RITSU_CFG.kiosk ? ['chat/user', ...camTopics] : camTopics);
-    });
-    mq.on('close', () => lampMqtt.classList.remove('on'));
-    mq.on('message', (topic, payload) => {
-      let msg;
-      try { msg = JSON.parse(payload.toString()); } catch { return; }
-      if (topic === 'chat/user' && typeof msg.text === 'string') {
-        brain.chat(msg.text.slice(0, 200));
-      } else if (topic === 'perception/tilt' && typeof msg.roll === 'number') {
-        onTilt(msg.roll);
-      } else if (topic === 'perception/status') {
-        camSeenAt = performance.now();
-      } else if (topic === 'perception/person' && msg.present) {
-        camSeenAt = personSeenAt = performance.now();
-        // カメラ座標[m] → 視線オフセット(-1..1)。x:右+ y:上+ z:奥行き
-        const z = Math.max(0.3, msg.z || 1.0);
-        gaze = {
-          x: THREE.MathUtils.clamp(-(msg.x / z) * 2.2, -1, 1),
-          y: THREE.MathUtils.clamp(-(msg.y / z) * 2.0 + 0.15, -1, 1),
-        };
-        gazeTimeout = 1.2;   // 検出が途切れたら1.2秒で正面に戻る
-      }
+  if (ros) {
+    if (RITSU_CFG.kiosk) {
+      ros.sub('/ritsu/chat_user', 'std_msgs/String', m => {
+        let msg;
+        try { msg = JSON.parse(m.data); } catch { msg = { text: m.data }; }   // 素の文字列でも受け付ける
+        if (typeof msg.text === 'string') brain.chat(msg.text.slice(0, 200));
+      });
+    }
+    ros.sub('/ritsu/tilt', 'geometry_msgs/Vector3', m => onTilt(m.x));
+    ros.sub('/ritsu/camera_alive', 'std_msgs/Bool', () => { camSeenAt = performance.now(); });
+    ros.sub('/ritsu/person', 'geometry_msgs/PointStamped', m => {
+      camSeenAt = personSeenAt = performance.now();
+      // 光学座標系[m](x:右 / y:下 / z:前) → 視線オフセット(-1..1)
+      const { x, y } = m.point;
+      const z = Math.max(0.3, m.point.z || 1.0);
+      gaze = {
+        x: THREE.MathUtils.clamp(-(x / z) * 2.2, -1, 1),
+        y: THREE.MathUtils.clamp((y / z) * 2.0 + 0.15, -1, 1),
+      };
+      gazeTimeout = 1.2;   // 検出が途切れたら1.2秒で正面に戻る
     });
   }
 
@@ -264,8 +260,8 @@
     const text = input.value.trim();
     if (!text) return;
     input.value = '';
-    // kiosk では画面のキーボード入力も MQTT に流し、入力ページの履歴にも出す
-    if (chatOverMqtt()) pub('chat/user', { text, from: 'screen' });
+    // kiosk では画面のキーボード入力も ROS 2 に流し、入力ページの履歴にも出す
+    if (chatOverRos()) pubJson('/ritsu/chat_user', { text, from: 'screen' });
     else brain.chat(text);
   };
   document.getElementById('chat-send').addEventListener('click', send);

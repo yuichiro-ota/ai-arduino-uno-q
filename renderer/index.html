@@ -72,13 +72,14 @@
 
 <div id="status">
   <div class="lamp"><div class="dot" id="lamp-llm"></div>LLM</div>
-  <div class="lamp"><div class="dot" id="lamp-mqtt"></div>MQTT</div>
+  <div class="lamp"><div class="dot" id="lamp-ros"></div>ROS</div>
   <div class="lamp"><div class="dot" id="lamp-cam"></div>CAMERA</div>
 </div>
 
 <script src="config.js"></script>
-<!-- three.js / three-vrm / mqtt.js : オフライン運用時は js/vendor/ に配置して差し替え -->
-<script src="https://cdn.jsdelivr.net/npm/mqtt@5.3.5/dist/mqtt.min.js"></script>
+<!-- three.js / three-vrm / roslib.js : オフライン運用時は js/vendor/ に配置して差し替え -->
+<script src="https://cdn.jsdelivr.net/npm/roslib@1.4.1/build/roslib.min.js"></script>
+<script src="js/ros.js"></script>
 <script type="importmap">
 {
   "imports": {

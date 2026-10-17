@@ -1,27 +1,24 @@
 #!/usr/bin/env python3
 """
-perception/app.py — Orbbec Gemini 335 人検出サービス
+ritsu_perception.py — 律の人検出 ROS 2 ノード (Orbbec Gemini 335)
 
-カラー画像で顔検出(OpenCV YuNet)し、深度から顔の3D位置を計算して
-`perception/person` トピックへ配信する。律の視線追従の目になる。
+カラー画像で顔検出(OpenCV YuNet)し、深度から顔の3D位置を計算して配信する。律の視線追従の目になる。
 
-配信フォーマット:
-  {"present": true, "x": -0.31, "y": 0.05, "z": 1.42, "conf": 0.93}
-  x: 右+ / y: 上+ / z: カメラからの距離 [m](カメラ座標系)
-  見失ったら {"present": false}
-  あわせて `perception/status` に {"alive": true, "present": bool} を2秒ごとに送る(画面のCAMERAランプ用)
-  IMU(加速度)から求めたカメラの傾きを `perception/tilt` に {"roll": 度, "pitch": 度} で10回/秒送る
-  (起動直後の向きを0度とする。roll: 左右の傾き / pitch: 前後の傾き)
+発行トピック:
+  /ritsu/person          geometry_msgs/PointStamped  顔(両目の中点)の位置 [m]
+                         frame_id=camera_color_optical_frame (x:右 / y:下 / z:前、ROSの光学座標系)
+  /ritsu/person_present  std_msgs/Bool     人がいるか (見失ったときに false)
+  /ritsu/camera_alive    std_msgs/Bool     2秒ごとの生存通知 (画面の CAMERA ランプ用)
+  /camera/imu            sensor_msgs/Imu   加速度の生データ (linear_acceleration のみ)
+  /ritsu/tilt            geometry_msgs/Vector3  カメラの傾き [度] x=roll(左右) y=pitch(前後)。起動直後を0度とする
 
 環境変数:
-  MQTT_HOST       MQTTブローカー (default 127.0.0.1)。開発PCからは UNO Q の 192.168.3.80
   CAMERA_ROTATE   0/90/180/270 — カメラを縦置きする場合の回転補正
   PERCEPTION_FPS  配信頻度 [回/秒] (default 15)
   IMU_ROLL_SIGN   傾きの左右が逆のとき -1 (default 1)
   DEBUG_SNAPSHOT  1 にすると5秒ごとにカメラ画像(検出枠つき)を debug/camera.jpg に保存する
                   (docker-compose で renderer/debug にマウント → http://<UNO Q>:8080/debug/camera.jpg で見られる)
 """
-import json
 import math
 import os
 import threading
@@ -29,33 +26,43 @@ import time
 
 import cv2
 import numpy as np
-import paho.mqtt.client as mqtt
+import rclpy
+from geometry_msgs.msg import PointStamped, Vector3
+from sensor_msgs.msg import Imu
+from std_msgs.msg import Bool
 
-MQTT_HOST = os.environ.get("MQTT_HOST", "127.0.0.1")
 ROTATE = int(os.environ.get("CAMERA_ROTATE", "0"))
 FPS = float(os.environ.get("PERCEPTION_FPS", "15"))
 LOG_EVERY_SEC = 5   # 検出状況をログへ出す間隔
 NO_FRAME_RESTART_SEC = 10   # この秒数カメラから映像が来なければ開き直す
-STATUS_EVERY_SEC = 2        # perception/status を送る間隔
+STATUS_EVERY_SEC = 2        # /ritsu/camera_alive を送る間隔
 FACE_MODEL = os.environ.get("FACE_MODEL", "/app/models/yunet.onnx")
 FACE_SCORE = float(os.environ.get("FACE_SCORE", "0.6"))   # 顔とみなす信頼度の下限
 IMU_ROLL_SIGN = float(os.environ.get("IMU_ROLL_SIGN", "1"))
-TILT_EVERY_SEC = 0.1        # perception/tilt を送る間隔
+TILT_EVERY_SEC = 0.1        # /ritsu/tilt を送る間隔
 DEBUG_SNAPSHOT = os.environ.get("DEBUG_SNAPSHOT", "0") == "1"
 SNAPSHOT_PATH = "/app/debug/camera.jpg"
 
-# ---------------- MQTT ----------------
-mq = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="ritsu-perception")
-mq.connect_async(MQTT_HOST, 1883, keepalive=30)   # ブローカーが後から起動しても自動で再接続
-mq.loop_start()
+# ---------------- ROS 2 ----------------
+rclpy.init()
+node = rclpy.create_node("ritsu_perception")
+pub_person = node.create_publisher(PointStamped, "/ritsu/person", 10)
+pub_present = node.create_publisher(Bool, "/ritsu/person_present", 10)
+pub_alive = node.create_publisher(Bool, "/ritsu/camera_alive", 10)
+pub_imu = node.create_publisher(Imu, "/camera/imu", 10)
+pub_tilt = node.create_publisher(Vector3, "/ritsu/tilt", 10)
 
 
-def publish(payload: dict):
-    mq.publish("perception/person", json.dumps(payload), qos=0)
+def publish_person(x, y, z):
+    msg = PointStamped()
+    msg.header.stamp = node.get_clock().now().to_msg()
+    msg.header.frame_id = "camera_color_optical_frame"
+    msg.point.x, msg.point.y, msg.point.z = x, y, z
+    pub_person.publish(msg)
 
 
-def publish_status(present: bool):
-    mq.publish("perception/status", json.dumps({"alive": True, "present": present}), qos=0)
+def publish_bool(pub, value: bool):
+    pub.publish(Bool(data=value))
 
 
 # ---------------- IMU (カメラの傾き) ----------------
@@ -90,8 +97,14 @@ class TiltSensor:
             now = time.time()
             if now - self.last_pub >= TILT_EVERY_SEC:
                 self.last_pub = now
-                mq.publish("perception/tilt", json.dumps(
-                    {"roll": round(self.roll, 1), "pitch": round(self.pitch, 1)}), qos=0)
+                pub_tilt.publish(Vector3(x=round(self.roll, 1), y=round(self.pitch, 1), z=0.0))
+                imu = Imu()
+                imu.header.stamp = node.get_clock().now().to_msg()
+                imu.header.frame_id = "camera_imu_frame"
+                imu.linear_acceleration.x, imu.linear_acceleration.y, imu.linear_acceleration.z = x, y, z
+                imu.orientation_covariance[0] = -1.0          # 姿勢・角速度は出さない
+                imu.angular_velocity_covariance[0] = -1.0
+                pub_imu.publish(imu)
 
 
 tilt = TiltSensor()
@@ -107,7 +120,7 @@ def start_imu(pipeline):
         def on_frame(frame):
             f = frame.as_accel_frame()
             if f is not None:
-                tilt.on_accel(f.get_x(), f.get_y(), f.get_z())
+                tilt.on_accel(float(f.get_x()), float(f.get_y()), float(f.get_z()))
 
         sensor.start(profile, on_frame)
         print("[perception] IMU (accel) started")
@@ -209,7 +222,7 @@ def main():
     detector = cv2.FaceDetectorYN.create(FACE_MODEL, "", (640, 480), FACE_SCORE, 0.3, 5)
 
     pipeline, (fx, fy, cx, cy) = open_camera()
-    print(f"[perception] camera ready fx={fx:.1f} fy={fy:.1f} -> mqtt {MQTT_HOST}:1883")
+    print(f"[perception] camera ready fx={fx:.1f} fy={fy:.1f}")
     imu = start_imu(pipeline)
 
     last_pub = 0.0
@@ -220,7 +233,6 @@ def main():
     hits = 0
     faces = 0        # 顔は見つかった回数(深度が取れずに捨てた分も含む)
     no_depth = 0     # 顔はあったが深度が取れなかった回数
-    last_z = None
     while True:
         fs = pipeline.wait_for_frames(200)
         cf = fs.get_color_frame() if fs else None
@@ -260,24 +272,23 @@ def main():
                 no_depth += 1
             else:
                 z = float(np.median(valid)) / 1000.0
-                last_z = z
-                found = {"present": True,
-                         "x": round((u - cx) / fx * z, 3),
-                         "y": round(-(v - cy) / fy * z, 3),  # 画像下+ → 上+ に反転
-                         "z": round(z, 3),
-                         "conf": round(score, 2)}
+                found = {"x": (u - cx) / fx * z,
+                         "y": (v - cy) / fy * z,     # 光学座標系なので y は下が+
+                         "z": z}
 
         if found:
-            publish(found)
+            publish_person(found["x"], found["y"], found["z"])
+            if miss:
+                publish_bool(pub_present, True)
             miss = 0
             hits += 1
         else:
             miss += 1
             if miss in (3, 30):  # 途切れ通知(連投しない)
-                publish({"present": False})
+                publish_bool(pub_present, False)
 
         if now - last_status >= STATUS_EVERY_SEC:
-            publish_status(found is not None)
+            publish_bool(pub_alive, True)
             last_status = now
 
         if now - last_log >= LOG_EVERY_SEC:
@@ -286,7 +297,7 @@ def main():
             imu_state = (f", tilt roll={tilt.roll:+.0f} pitch={tilt.pitch:+.0f}" if imu and tilt.base
                          else (", imu waiting" if imu else ""))
             print(f"[perception] {state} ({hits} hits, {faces} faces, {no_depth} no-depth / "
-                  f"{LOG_EVERY_SEC}s, mqtt {'ok' if mq.is_connected() else 'disconnected'}{imu_state})")
+                  f"{LOG_EVERY_SEC}s{imu_state})")
             if DEBUG_SNAPSHOT:
                 save_snapshot(view, box, found, depth, scale)
             last_log, hits, faces, no_depth = now, 0, 0, 0
@@ -298,5 +309,5 @@ if __name__ == "__main__":
             main()
         except Exception as e:  # カメラ抜け等からの自動復帰
             print(f"[perception] error: {e} — retry in 3s")
-            publish({"present": False})
+            publish_bool(pub_present, False)
             time.sleep(3)

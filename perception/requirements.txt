@@ -1,5 +1,0 @@
-paho-mqtt>=2.0
-numpy<2
-# 顔検出は OpenCV 内蔵の YuNet (cv2.FaceDetectorYN) を使う。
-# MediaPipe は Linux arm64 (UNO Q) 版で顔を検出できなかったため使わない。
-opencv-python-headless==4.11.0.86

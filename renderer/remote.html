@@ -87,10 +87,11 @@
   <button id="send" type="submit" disabled>送信</button>
 </form>
 
-<script src="https://cdn.jsdelivr.net/npm/mqtt@5.3.5/dist/mqtt.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/roslib@1.4.1/build/roslib.min.js"></script>
+<script src="js/ros.js"></script>
 <script>
 /* remote.html — iPhone などから律に話しかける入力ページ
- *   chat/user に送信し、画面の律(kiosk)が返した avatar/say を履歴に表示する */
+ *   ROS 2 の /ritsu/chat_user に送信し、画面の律(kiosk)が返した /ritsu/say を履歴に表示する */
 (() => {
   const myId = 'remote-' + Math.random().toString(36).slice(2, 10);
   const log = document.getElementById('log');
@@ -116,39 +117,33 @@
     log.scrollTop = log.scrollHeight;
   }
 
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const mq = mqtt.connect(`${proto}://${location.host}/mqtt`, { reconnectPeriod: 3000 });
-
-  mq.on('connect', () => {
-    conn.classList.add('on'); connText.textContent = '接続';
-    sendBtn.disabled = false;
-    mq.subscribe(['chat/user', 'avatar/say', 'avatar/thinking']);
+  const ros = new RitsuRos(null, ok => {
+    conn.classList.toggle('on', ok);
+    connText.textContent = ok ? '接続' : '再接続中…';
+    sendBtn.disabled = !ok;
   });
-  mq.on('close', () => {
-    conn.classList.remove('on'); connText.textContent = '再接続中…';
-    sendBtn.disabled = true;
-  });
+  const parse = data => { try { return JSON.parse(data); } catch { return { text: data }; } };
 
-  mq.on('message', (topic, payload) => {
-    let msg;
-    try { msg = JSON.parse(payload.toString()); } catch { return; }
-    if (typeof msg !== 'object' || msg === null) return;
-    if (topic === 'chat/user' && typeof msg.text === 'string') {
-      if (msg.from === myId) add('me', msg.text);
-      else add('other', msg.text, msg.from === 'screen' ? '画面から' : 'ほかの人');
-    } else if (topic === 'avatar/say' && typeof msg.text === 'string') {
-      add(msg.source === 'idle' ? 'ritsu idle' : 'ritsu', msg.text, '律');
-    } else if (topic === 'avatar/thinking') {
-      thinking.classList.toggle('show', !!msg.on);
-      log.scrollTop = log.scrollHeight;
-    }
+  ros.sub('/ritsu/chat_user', 'std_msgs/String', m => {
+    const msg = parse(m.data);
+    if (typeof msg.text !== 'string') return;
+    if (msg.from === myId) add('me', msg.text);
+    else add('other', msg.text, msg.from === 'screen' ? '画面から' : 'ほかの人');
+  });
+  ros.sub('/ritsu/say', 'std_msgs/String', m => {
+    const msg = parse(m.data);
+    if (typeof msg.text === 'string') add(msg.source === 'idle' ? 'ritsu idle' : 'ritsu', msg.text, '律');
+  });
+  ros.sub('/ritsu/thinking', 'std_msgs/Bool', m => {
+    thinking.classList.toggle('show', !!m.data);
+    log.scrollTop = log.scrollHeight;
   });
 
   document.getElementById('form').addEventListener('submit', e => {
     e.preventDefault();
     const text = input.value.trim();
-    if (!text || !mq.connected) return;
-    mq.publish('chat/user', JSON.stringify({ text, from: myId }));
+    if (!text) return;
+    if (!ros.pub('/ritsu/chat_user', 'std_msgs/String', { data: JSON.stringify({ text, from: myId }) })) return;
     input.value = '';
   });
 })();

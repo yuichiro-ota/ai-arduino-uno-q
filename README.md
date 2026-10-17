@@ -1,21 +1,22 @@
-# 律 (Ritsu) — Arduino UNO Q 版バーチャル看板娘 (VRM + three.js)
+# 律 (Ritsu) — Arduino UNO Q 版バーチャル看板娘 (VRM + three.js + ROS 2)
 
-VRMモデル「律」を Arduino UNO Q の HDMI 出力に表示する、表示専用の軽量構成です。
-UNO Q では nginx コンテナが静的ファイルを配信し、`/llm/` を LiteLLM（Proxmox CT201）へ中継します。APIキーは nginx 側で付けるので、ブラウザには渡りません。iPhone などからの話しかけと深度カメラの人の位置は、MQTT（mosquitto）を通して画面の律に届けます。
+VRMモデル「律」を Arduino UNO Q の画面に表示し、会話・視線追従・カメラの傾きへの反応を行います。
+センサーと画面のやり取りは **ROS 2 (Jazzy)** で行い、ブラウザ（画面の律・iPhone の入力ページ）は rosbridge 経由で ROS 2 につながります。将来、台車（メカナムホイール）のノードも同じ ROS 2 に足せます。
 
 ```
-                 UNO Q (192.168.3.80)                           CT201 (192.168.3.16)
-iPhone ─/remote─▶ nginx:8080 ─ /llm/* (+APIキー) ─────────────▶ LiteLLM :4000 ─▶ Ollama
-(Safari)  ◀─────┐   └ /mqtt ──▶ mosquitto ◀─┐
-                └────────── chat/user, avatar/say ─────────┐
-                                            │                │
-深度カメラ処理 ── perception/person :1883 ──┘      Chromium(kiosk) = 画面の律
+                     UNO Q (192.168.3.80)                                   CT201 (192.168.3.16)
+iPhone ─/remote─▶ nginx:8080 ─ /llm/* (+APIキー) ───────────────────▶ LiteLLM :4000 ─▶ Ollama
+(Safari)            └ /rosbridge ─▶ rosbridge :9090 ◀──ROS 2──▶ ritsu_perception (深度カメラ Gemini 335)
+                                        ▲
+                         Chromium(kiosk) = 画面の律
 ```
 
 - 48種類のモーション、8種類の表情、自動まばたき、呼吸、髪の揺れ（スプリングボーン）
 - チャット入力 → LLM の返答を字幕で表示し、返答の `[emotion:x][motion:y]` タグで表情とモーションを付ける。口パクあり（音声なし）
 - **iPhone などから話しかけられる**: `http://192.168.3.80:8080/remote` を開くと、入力ページから画面の律に話しかけ、返事を受け取れる（複数台で同時に使える）
-- 深度カメラの人の位置（`perception/person`）を受け取ると、律の目線がその人を追う
+- 深度カメラで人の顔の位置を測り（`/ritsu/person`）、律の目線がその人を追う
+- カメラ（IMU）が左右に15度以上傾くと、傾いた側へ「おっとっと」とよろける
+- 会話が無いと1〜2分に1回カメラが目元まで寄ってのぞき込む、話しかけると胸から上へ寄る、物音に振り向く
 - 一定間隔で独り言やダンスをする暇つぶし行動
 - `renderer/models/avatar.vrm` を差し替えるだけで別の VRM（0.x / 1.0）に変えられる。ファイルが無い場合は内蔵モデルで起動する
 
@@ -23,17 +24,19 @@ iPhone ─/remote─▶ nginx:8080 ─ /llm/* (+APIキー) ───────
 
 | パス | 内容 |
 |---|---|
-| `docker-compose.yml` | `nginx:alpine` と `eclipse-mosquitto:2`（どちらも arm64 対応）。ビルド不要 |
-| `mosquitto/mosquitto.conf` | MQTT。WebSocket（9001、nginx の `/mqtt` 経由）と、プログラム用の 1883 番。LAN 内専用で認証なし |
+| `docker-compose.yml` | `renderer`（nginx）、`rosbridge`、`perception`（人検出）。ROS 2 の2つはホストネットワーク + `ipc: host` |
 | `.env` | **LiteLLM の接続先とAPIキー**（`.env.example` からコピー。配信されない場所にある） |
-| `nginx/default.conf.template` | 起動時に `.env` の値を埋め込む nginx 設定。`/llm/` を LiteLLM に中継してキーを付ける。`/mqtt` を mosquitto に中継、`/remote` で入力ページを返す |
+| `nginx/default.conf.template` | 起動時に `.env` の値を埋め込む nginx 設定。`/llm/` を LiteLLM に中継してキーを付ける。`/rosbridge` を rosbridge に中継、`/remote` で入力ページを返す |
+| `ros/Dockerfile` | ROS 2 Jazzy のイメージ（rosbridge、Orbbec SDK、OpenCV、顔検出モデル YuNet） |
+| `ros/ritsu_perception.py` | 人検出・傾きの ROS 2 ノード |
+| `renderer/config.js` | モデル名（`chat` / `chat-large`）、タイムアウト、暇つぶし・のぞき込みの間隔、描画の重さ |
+| `renderer/index.html` | 画面（three.js / three-vrm / roslib.js は jsdelivr CDN から読み込み） |
 | `renderer/remote.html` | iPhone などから話しかける入力ページ |
-| `kiosk/ritsu-kiosk.sh` | キオスク表示の起動スクリプト |
-| `renderer/config.js` | モデル名（`chat` / `chat-large`）、タイムアウト、暇つぶしの間隔 |
-| `renderer/index.html` | 画面（three.js / three-vrm は jsdelivr CDN から読み込み） |
+| `renderer/js/ros.js` | rosbridge への接続（自動再接続・購読のやり直し） |
 | `renderer/js/brain.js` | LLM 呼び出し、タグ解析、暇つぶし行動 |
-| `renderer/js/main.js` | シーン、字幕、口パク、チャット UI |
+| `renderer/js/main.js` | シーン、カメラワーク、字幕、口パク、チャット UI、ROS 2 連携 |
 | `renderer/js/vrm_avatar.js` / `character.js` / `motions.js` | VRM 制御、内蔵モデル、モーション定義 |
+| `kiosk/ritsu-kiosk.sh` | キオスク表示の起動スクリプト |
 
 ## 1. LiteLLM（CT201）
 
@@ -69,7 +72,7 @@ UNO Q には GitHub の Deploy key（読み取り専用）を登録してあり�
 cd ~/ritu && git clone git@github.com:yuichiro-ota/ai-arduino-uno-q.git
 cd ai-arduino-uno-q
 cp .env.example .env && chmod 600 .env   # LITELLM_KEY を記入（.env は Git の管理外）
-docker compose up -d
+docker compose up -d --build
 
 # 更新（WSL で push したあと）
 cd ~/ritu/ai-arduino-uno-q && git pull
@@ -105,32 +108,33 @@ sudo reboot
 - **画面が映らない、または映ってすぐ消える**: Xfce のディスプレイ設定が壊れている場合があります。`~/.config/xfce4/xfconf/xfce-perchannel-xml/displays.xml` を退避して `sudo systemctl restart lightdm` を実行してください。
 - **SSH から画面を操作するとき**: `DISPLAY=:0` を付けます。MobaXterm などで X11 転送が有効だと、Windows 側に表示されます。
 
-## 5. MQTT トピック
+## 5. ROS 2 トピック
 
-| トピック | 送る側 → 受け取る側 | 内容 |
-|---|---|---|
-| `chat/user` | 入力ページ・画面のキーボード → 画面の律 | `{"text":"...","from":"..."}` |
-| `avatar/say` | 画面の律 → 入力ページ | `{"text":"...","emotion":"happy","motion":"wave","source":"llm/fallback/idle"}` |
-| `avatar/thinking` | 画面の律 → 入力ページ | `{"on":true}` 返事を考え中 |
-| `perception/person` | 深度カメラ処理 → 画面の律 | `{"present":true,"x":-0.3,"y":0.1,"z":1.2}` カメラ座標[m]（x:右、y:上、z:奥行き） |
-| `perception/status` | 深度カメラ処理 → 画面の律 | `{"alive":true,"present":false}` 2秒ごとの生存通知（画面右上の CAMERA ランプ: 緑=人を検出中、黄=人はいない、灰=通知なし） |
-| `perception/tilt` | 深度カメラ処理 → 画面の律 | `{"roll":12.3,"pitch":-1.0}` カメラ(IMU)の傾き[度]。起動時を0度とする。左右に15度以上傾くと「おっとっと」(8度未満に戻るまで再発動しない) |
+| トピック | 型 | 送る側 → 受け取る側 | 内容 |
+|---|---|---|---|
+| `/ritsu/chat_user` | `std_msgs/String` | 入力ページ・画面のキーボード → 画面の律 | JSON `{"text":"...","from":"..."}`（素の文字列でも可） |
+| `/ritsu/say` | `std_msgs/String` | 画面の律 → 入力ページ | JSON `{"text":"...","emotion":"happy","motion":"wave","source":"llm/fallback/idle"}` |
+| `/ritsu/thinking` | `std_msgs/Bool` | 画面の律 → 入力ページ | 返事を考え中 |
+| `/ritsu/person` | `geometry_msgs/PointStamped` | 人検出 → 画面の律 | 顔（両目の中点）の位置 [m]。`camera_color_optical_frame`（x:右、y:下、z:前） |
+| `/ritsu/person_present` | `std_msgs/Bool` | 人検出 → | 人を見失ったら false |
+| `/ritsu/camera_alive` | `std_msgs/Bool` | 人検出 → 画面の律 | 2秒ごとの生存通知（画面右上の CAMERA ランプ: 緑=人を検出中、黄=人はいない、灰=通知なし） |
+| `/ritsu/tilt` | `geometry_msgs/Vector3` | 人検出 → 画面の律 | カメラの傾き [度]。x=roll（左右）、y=pitch（前後）。起動時を0度。左右15度以上で「おっとっと」（8度未満に戻るまで再発動しない） |
+| `/camera/imu` | `sensor_msgs/Imu` | 人検出 → | 加速度の生データ（`linear_acceleration` のみ） |
 
-- `chat/user` に応答するのは、URL に `?kiosk=1` を付けて開いた画面（キオスク表示）だけです。PC などで `index.html` を開いて確認しても、二重に返事をしません。
-- 深度カメラの処理は、UNO Q でも別のマシンでも、`192.168.3.80:1883` に `perception/person` を送れば律の目線が動きます。テスト: `docker exec ritsu-mqtt mosquitto_pub -t perception/person -m '{"present":true,"x":-0.5,"y":0,"z":1.2}'`
+- `/ritsu/chat_user` に応答するのは、URL に `?kiosk=1` を付けて開いた画面（キオスク表示）だけです。PC などで `index.html` を開いて確認しても、二重に返事をしません。
+- ROS 2 のコマンドで試す例: `docker exec -it ritsu-camera bash -c "source /opt/ros/jazzy/setup.bash && ros2 topic echo /ritsu/person"`
+- 別のマシン（台車の Jetson など）の ROS 2 からも、同じネットワーク・同じ `ROS_DOMAIN_ID`（既定 0）ならトピックが見えます。
 
 ## 6. 深度カメラ（Orbbec Gemini 335）
 
-`perception/` が人検出です。カラー映像から OpenCV の YuNet で顔を検出し、深度から3次元の位置を求めて、`perception/person` に送ります。律の画面とは別に起動します。
+`perception` サービス（`ros/ritsu_perception.py`）が人検出です。カラー映像から OpenCV の YuNet で顔を検出し、深度から3次元の位置を求めて `/ritsu/person` に送ります。IMU（加速度）からカメラの傾きも求めます。
 
 ```bash
-cd perception
-MQTT_HOST=127.0.0.1 PERCEPTION_FPS=8 docker compose up -d --build   # UNO Q 上で動かす場合
-docker compose up -d --build                                         # 開発PCから UNO Q (192.168.3.80) に送る場合
-docker logs -f ritsu-camera                                          # 検出状況が5秒ごとに出る
+docker compose up -d --build              # 律の画面・rosbridge・人検出をまとめて起動
+docker logs -f ritsu-camera               # 検出状況が5秒ごとに出る
 ```
 
-- 環境変数: `MQTT_HOST`（送り先）、`CAMERA_ROTATE`（カメラを縦置きしたとき 90/180/270）、`PERCEPTION_FPS`（1秒あたりの検出回数）、`IMU_ROLL_SIGN`（傾けた向きと律がよろける向き。Gemini 335 実機に合わせて既定は -1、逆なら 1）、`DEBUG_SNAPSHOT`（1 で確認用画像を `:8080/debug/camera.jpg` に出す）
+- 環境変数: `CAMERA_ROTATE`（カメラを縦置きしたとき 90/180/270）、`PERCEPTION_FPS`（1秒あたりの検出回数、既定 8）、`IMU_ROLL_SIGN`（傾けた向きと律がよろける向き。Gemini 335 実機に合わせて既定は -1）、`DEBUG_SNAPSHOT`（1 で確認用画像を `:8080/debug/camera.jpg` に出す。LAN 内の誰でも見えるので確認後は外す）
 - カメラから10秒映像が来なければ、自動で開き直します。
 - 開発PC（WSL）で使うときは、Windows 側で usbipd-win を使ってカメラを WSL に渡します（`usbipd bind --busid <BUSID>` → `usbipd attach --wsl --busid <BUSID>`）。
 

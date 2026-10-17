@@ -1,9 +1,17 @@
-# 律 (Ritsu) — Arduino UNO Q 版バーチャル看板娘 (VRM + three.js)
-#   renderer  : 静的ファイル(HTML / three.js / VRM)を nginx で配信
-#               /llm/ を LiteLLM (CT201) へ中継し、APIキーはサーバー側で付与
-#               /mqtt を mosquitto の WebSocket へ中継
-#   mosquitto : MQTT。iPhone の入力ページ(/remote)・画面の律・深度カメラ処理をつなぐ
-#   どちらも arm64 対応イメージのため、ビルド不要でそのまま UNO Q 上で起動できる
+# 律 (Ritsu) — Arduino UNO Q 版バーチャル看板娘 (VRM + three.js + ROS 2)
+#   renderer   : 静的ファイル(HTML / three.js / VRM)を nginx で配信
+#                /llm/ を LiteLLM (CT201) へ中継し APIキーはサーバー側で付与、/rosbridge を rosbridge へ中継
+#   rosbridge  : ROS 2 とブラウザ(画面の律・iPhone の入力ページ)をつなぐ WebSocket (9090)
+#   perception : 深度カメラ(Orbbec Gemini 335)の人検出・傾き ROS 2 ノード
+#   ROS 2 の2つはホストネットワーク + ipc: host (同じホスト内のDDS共有メモリ通信のため)。
+#   台車のノードや別マシン(Jetson 等)の ROS 2 とも、同じネットワーク・同じ ROS_DOMAIN_ID ならつながる。
+
+x-ros: &ros
+  build: ./ros
+  image: ritsu-ros
+  restart: unless-stopped
+  network_mode: host
+  ipc: host
 
 services:
   renderer:
@@ -13,17 +21,30 @@ services:
     ports:
       - "8080:80"
     env_file: .env                                  # LITELLM_URL / LITELLM_KEY
+    extra_hosts:
+      - "host.docker.internal:host-gateway"         # ホストネットワークの rosbridge へ中継するため
     volumes:
       - ./renderer:/usr/share/nginx/html:ro         # config.js / VRM は編集・差し替えしてリロードするだけ
       - ./nginx:/etc/nginx/templates:ro             # 起動時に .env の値を埋め込んで default.conf を生成
-    depends_on:
-      - mosquitto
 
-  mosquitto:
-    image: eclipse-mosquitto:2
-    container_name: ritsu-mqtt
-    restart: unless-stopped
-    ports:
-      - "1883:1883"                                 # 深度カメラ処理などのプログラム用
+  rosbridge:
+    <<: *ros
+    container_name: ritsu-rosbridge
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+    command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && exec ros2 launch rosbridge_server rosbridge_websocket_launch.xml port:=9090"]
+
+  perception:
+    <<: *ros
+    container_name: ritsu-camera
+    privileged: true                                # USBデバイスアクセス (Gemini 335)
     volumes:
-      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - /dev/bus/usb:/dev/bus/usb
+      - ./renderer/debug:/app/debug                 # DEBUG_SNAPSHOT=1 のとき camera.jpg を保存(:8080/debug/camera.jpg)
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - CAMERA_ROTATE=${CAMERA_ROTATE:-0}           # カメラを縦置きしたとき 90/180/270
+      - PERCEPTION_FPS=${PERCEPTION_FPS:-8}         # UNO Q の CPU に合わせた検出回数
+      - DEBUG_SNAPSHOT=${DEBUG_SNAPSHOT:-0}
+      - IMU_ROLL_SIGN=${IMU_ROLL_SIGN:--1}          # Gemini 335 実機では -1 で傾けた側へよろける
+    command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && exec python3 ritsu_perception.py"]

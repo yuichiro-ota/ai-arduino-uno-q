@@ -1,8 +1,5 @@
 paho-mqtt>=2.0
 numpy<2
-# MediaPipeがopencv-contrib-pythonを要求するため、opencv-python-headlessを
-# 同時に入れない。numpy<2と互換性のある版へ固定してpipのバックトラックを防ぐ。
-opencv-contrib-python==4.11.0.86
-# 1.0以降では既存のmp.solutions APIが削除されているため固定する。
-# 0.10.19以降は Linux arm64 (UNO Q) 向けの配布が無いため、x86_64 と共通で 0.10.18 にする。
-mediapipe==0.10.18
+# 顔検出は OpenCV 内蔵の YuNet (cv2.FaceDetectorYN) を使う。
+# MediaPipe は Linux arm64 (UNO Q) 版で顔を検出できなかったため使わない。
+opencv-python-headless==4.11.0.86

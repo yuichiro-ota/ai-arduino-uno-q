@@ -120,7 +120,7 @@ sudo reboot
 
 ## 6. 深度カメラ（Orbbec Gemini 335）
 
-`perception/` が人検出です。カラー映像から MediaPipe で顔を検出し、深度から3次元の位置を求めて、`perception/person` に送ります。律の画面とは別に起動します。
+`perception/` が人検出です。カラー映像から OpenCV の YuNet で顔を検出し、深度から3次元の位置を求めて、`perception/person` に送ります。律の画面とは別に起動します。
 
 ```bash
 cd perception

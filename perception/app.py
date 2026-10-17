@@ -2,7 +2,7 @@
 """
 perception/app.py — Orbbec Gemini 335 人検出サービス
 
-カラー画像で顔検出(MediaPipe)し、深度から顔の3D位置を計算して
+カラー画像で顔検出(OpenCV YuNet)し、深度から顔の3D位置を計算して
 `perception/person` トピックへ配信する。律の視線追従の目になる。
 
 配信フォーマット:
@@ -32,6 +32,8 @@ FPS = float(os.environ.get("PERCEPTION_FPS", "15"))
 LOG_EVERY_SEC = 5   # 検出状況をログへ出す間隔
 NO_FRAME_RESTART_SEC = 10   # この秒数カメラから映像が来なければ開き直す
 STATUS_EVERY_SEC = 2        # perception/status を送る間隔
+FACE_MODEL = os.environ.get("FACE_MODEL", "/app/models/yunet.onnx")
+FACE_SCORE = float(os.environ.get("FACE_SCORE", "0.6"))   # 顔とみなす信頼度の下限
 DEBUG_SNAPSHOT = os.environ.get("DEBUG_SNAPSHOT", "0") == "1"
 SNAPSHOT_PATH = "/app/debug/camera.jpg"
 
@@ -123,10 +125,22 @@ def save_snapshot(view, box, found, depth, scale):
     os.replace(tmp, SNAPSHOT_PATH)
 
 
+def detect_face(detector, view):
+    """最も大きい(=近い)顔を返す: ((x, y, w, h), (目の中点 u, v), score)。無ければ None"""
+    vh, vw = view.shape[:2]
+    detector.setInputSize((vw, vh))
+    _, faces = detector.detect(cv2.cvtColor(view, cv2.COLOR_RGB2BGR))
+    if faces is None or not len(faces):
+        return None
+    f = max(faces, key=lambda r: r[2] * r[3])
+    x, y, w, h = (int(v) for v in f[:4])
+    eye_u = int((f[4] + f[6]) / 2)   # 右目(4,5)と左目(6,7)の中点
+    eye_v = int((f[5] + f[7]) / 2)
+    return (x, y, w, h), (eye_u, eye_v), float(f[14])
+
+
 def main():
-    import mediapipe as mp
-    detector = mp.solutions.face_detection.FaceDetection(
-        model_selection=1, min_detection_confidence=0.5)  # model 1 = 〜5m対応
+    detector = cv2.FaceDetectorYN.create(FACE_MODEL, "", (640, 480), FACE_SCORE, 0.3, 5)
 
     pipeline, (fx, fy, cx, cy) = open_camera()
     print(f"[perception] camera ready fx={fx:.1f} fy={fy:.1f} -> mqtt {MQTT_HOST}:1883")
@@ -158,22 +172,15 @@ def main():
 
         color, depth, scale = frames_to_np(cf, df)
         view = rotate_img(color, ROTATE)
-        result = detector.process(view)
+        det = detect_face(detector, view)
 
         found = None
         box = None
-        if result.detections:
+        if det:
             faces += 1
-            # 最も大きい(=近い)顔を採用
-            det = max(result.detections,
-                      key=lambda d: d.location_data.relative_bounding_box.width)
-            bb = det.location_data.relative_bounding_box
-            vh, vw = view.shape[:2]
-            box = (int(bb.xmin * vw), int(bb.ymin * vh), int(bb.width * vw), int(bb.height * vh))
+            box, (eye_u, eye_v), score = det
             h, w = color.shape[:2]
-            u, v = to_sensor_uv(int((bb.xmin + bb.width / 2) * vw),
-                                int((bb.ymin + bb.height / 3) * vh),  # 目の高さあたり
-                                w, h)
+            u, v = to_sensor_uv(eye_u, eye_v, w, h)
             u = int(np.clip(u, 2, w - 3))
             v = int(np.clip(v, 2, h - 3))
 
@@ -189,7 +196,7 @@ def main():
                          "x": round((u - cx) / fx * z, 3),
                          "y": round(-(v - cy) / fy * z, 3),  # 画像下+ → 上+ に反転
                          "z": round(z, 3),
-                         "conf": round(det.score[0], 2)}
+                         "conf": round(score, 2)}
 
         if found:
             publish(found)

@@ -130,7 +130,7 @@ docker compose up -d --build                                         # 開発PC�
 docker logs -f ritsu-camera                                          # 検出状況が5秒ごとに出る
 ```
 
-- 環境変数: `MQTT_HOST`（送り先）、`CAMERA_ROTATE`（カメラを縦置きしたとき 90/180/270）、`PERCEPTION_FPS`（1秒あたりの検出回数）、`IMU_ROLL_SIGN`（傾けた向きと律がよろける向きが逆のとき -1）、`DEBUG_SNAPSHOT`（1 で確認用画像を `:8080/debug/camera.jpg` に出す）
+- 環境変数: `MQTT_HOST`（送り先）、`CAMERA_ROTATE`（カメラを縦置きしたとき 90/180/270）、`PERCEPTION_FPS`（1秒あたりの検出回数）、`IMU_ROLL_SIGN`（傾けた向きと律がよろける向き。Gemini 335 実機に合わせて既定は -1、逆なら 1）、`DEBUG_SNAPSHOT`（1 で確認用画像を `:8080/debug/camera.jpg` に出す）
 - カメラから10秒映像が来なければ、自動で開き直します。
 - 開発PC（WSL）で使うときは、Windows 側で usbipd-win を使ってカメラを WSL に渡します（`usbipd bind --busid <BUSID>` → `usbipd attach --wsl --busid <BUSID>`）。
 

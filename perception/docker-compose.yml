@@ -16,3 +16,4 @@ services:
       - CAMERA_ROTATE=${CAMERA_ROTATE:-0}   # カメラを縦置きしたとき 90/180/270
       - PERCEPTION_FPS=${PERCEPTION_FPS:-15}
       - DEBUG_SNAPSHOT=${DEBUG_SNAPSHOT:-0}
+      - IMU_ROLL_SIGN=${IMU_ROLL_SIGN:--1}  # Gemini 335 実機では -1 で傾けた側へよろける

@@ -114,6 +114,7 @@ sudo reboot
 | `avatar/thinking` | 画面の律 → 入力ページ | `{"on":true}` 返事を考え中 |
 | `perception/person` | 深度カメラ処理 → 画面の律 | `{"present":true,"x":-0.3,"y":0.1,"z":1.2}` カメラ座標[m]（x:右、y:上、z:奥行き） |
 | `perception/status` | 深度カメラ処理 → 画面の律 | `{"alive":true,"present":false}` 2秒ごとの生存通知（画面右上の CAMERA ランプ: 緑=人を検出中、黄=人はいない、灰=通知なし） |
+| `perception/tilt` | 深度カメラ処理 → 画面の律 | `{"roll":12.3,"pitch":-1.0}` カメラ(IMU)の傾き[度]。起動時を0度とする。左右に15度以上傾くと「おっとっと」(8度未満に戻るまで再発動しない) |
 
 - `chat/user` に応答するのは、URL に `?kiosk=1` を付けて開いた画面（キオスク表示）だけです。PC などで `index.html` を開いて確認しても、二重に返事をしません。
 - 深度カメラの処理は、UNO Q でも別のマシンでも、`192.168.3.80:1883` に `perception/person` を送れば律の目線が動きます。テスト: `docker exec ritsu-mqtt mosquitto_pub -t perception/person -m '{"present":true,"x":-0.5,"y":0,"z":1.2}'`
@@ -129,7 +130,7 @@ docker compose up -d --build                                         # 開発PC�
 docker logs -f ritsu-camera                                          # 検出状況が5秒ごとに出る
 ```
 
-- 環境変数: `MQTT_HOST`（送り先）、`CAMERA_ROTATE`（カメラを縦置きしたとき 90/180/270）、`PERCEPTION_FPS`（1秒あたりの検出回数）
+- 環境変数: `MQTT_HOST`（送り先）、`CAMERA_ROTATE`（カメラを縦置きしたとき 90/180/270）、`PERCEPTION_FPS`（1秒あたりの検出回数）、`IMU_ROLL_SIGN`（傾けた向きと律がよろける向きが逆のとき -1）、`DEBUG_SNAPSHOT`（1 で確認用画像を `:8080/debug/camera.jpg` に出す）
 - カメラから10秒映像が来なければ、自動で開き直します。
 - 開発PC（WSL）で使うときは、Windows 側で usbipd-win を使ってカメラを WSL に渡します（`usbipd bind --busid <BUSID>` → `usbipd attach --wsl --busid <BUSID>`）。
 

@@ -6,6 +6,7 @@
  *   購読 chat/user          : {"text":"...","from":"..."}  入力ページ・画面のキーボードからの話しかけ (kioskのみ応答)
  *   購読 perception/person  : {"present":true,"x":-0.3,"y":0.1,"z":1.2}  人の位置 カメラ座標系[m] (視線追従)
  *   購読 perception/status  : {"alive":true,"present":false}  人検出の生存通知(2秒ごと。CAMERAランプ)
+ *   購読 perception/tilt    : {"roll":12.3,"pitch":-1.0}  カメラ(IMU)の傾き[度]。左右に大きく傾くと「おっとっと」
  *   発行 avatar/say         : {"text":"...","emotion":"happy","motion":"wave","source":"llm|fallback|idle"}
  *   発行 avatar/thinking    : {"on":true}  返事を考え中
  * =========================================================================
@@ -80,7 +81,7 @@
   // のぞき込みはカメラが戻った時点(stepCamera から resetEmotionAfterCamera を呼ぶ)、
   // 振り向きはモーション(首の戻り)が終わった時点で戻す
   const CAMERA_MOTIONS = ['peek'];
-  const MOTION_END_MOTIONS = ['noticeL', 'noticeR'];
+  const MOTION_END_MOTIONS = ['noticeL', 'noticeR', 'ottotoL', 'ottotoR'];
   let emotionTimer = null;
   let emotionUntilCamera = false;
   function resetEmotionAfterCamera() {
@@ -184,6 +185,21 @@
   let gaze = null;            // {x,y} -1..1
   let gazeTimeout = 0;
 
+  // おっとっと: カメラが左右に TILT_ON 度以上傾いたら、傾いた側へよろける。
+  // TILT_OFF 度未満に戻るまでは再発動しない(傾けっぱなしで連発しないように)
+  const TILT_ON = 15, TILT_OFF = 8, TILT_COOLDOWN = 3000;
+  const OTTOTO_LINES = ['おっとっと……!', 'わわっ、傾いてますよ……!', 'きゃっ……!', null, null];
+  let tiltArmed = true, lastOttoto = -Infinity;
+  function onTilt(roll) {
+    const now = performance.now();
+    if (Math.abs(roll) < TILT_OFF) tiltArmed = true;
+    if (!tiltArmed || Math.abs(roll) < TILT_ON || now - lastOttoto < TILT_COOLDOWN || brain.busy) return;
+    tiltArmed = false;
+    lastOttoto = now;
+    brain.act({ motion: roll > 0 ? 'ottotoR' : 'ottotoL', emotion: 'surprised',
+                text: OTTOTO_LINES[Math.floor(Math.random() * OTTOTO_LINES.length)], source: 'idle' });
+  }
+
   // CAMERAランプ: 緑=人を検出中 / 黄=カメラは動いているが人はいない / 灰=人検出からの通知なし
   const lampCam = document.getElementById('lamp-cam');
   let camSeenAt = -Infinity, personSeenAt = -Infinity;
@@ -217,7 +233,7 @@
   if (mq) {
     mq.on('connect', () => {
       lampMqtt.classList.add('on');
-      const camTopics = ['perception/person', 'perception/status'];
+      const camTopics = ['perception/person', 'perception/status', 'perception/tilt'];
       mq.subscribe(RITSU_CFG.kiosk ? ['chat/user', ...camTopics] : camTopics);
     });
     mq.on('close', () => lampMqtt.classList.remove('on'));
@@ -226,6 +242,8 @@
       try { msg = JSON.parse(payload.toString()); } catch { return; }
       if (topic === 'chat/user' && typeof msg.text === 'string') {
         brain.chat(msg.text.slice(0, 200));
+      } else if (topic === 'perception/tilt' && typeof msg.roll === 'number') {
+        onTilt(msg.roll);
       } else if (topic === 'perception/status') {
         camSeenAt = performance.now();
       } else if (topic === 'perception/person' && msg.present) {
@@ -298,5 +316,6 @@
     play: n => player.play(n), list: () => player.list(), ch: mochiko, brain,
     peek: () => brain.act({ motion: 'peek', emotion: 'surprised' }),
     notice: (dir = 1) => brain.act({ motion: dir > 0 ? 'noticeR' : 'noticeL', emotion: 'surprised' }),
+    ottoto: (dir = 1) => brain.act({ motion: dir > 0 ? 'ottotoR' : 'ottotoL', emotion: 'surprised' }),
   };
 })();

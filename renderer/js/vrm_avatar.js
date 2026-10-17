@@ -55,6 +55,7 @@ class VRMAvatar {
       shoulderLx: 0, shoulderLz: 0, shoulderRx: 0, shoulderRz: 0,
       elbowL: 0, elbowR: 0, forearmL: 0, forearmR: 0,
       wristL: 0, wristR: 0,
+      legLx: 0, legLz: 0, legRx: 0, legRz: 0, kneeL: 0, kneeR: 0,   // 足(太もも前後/横・ひざ)
       blink: 0, mouthOpen: 0, mouthSmile: 0.6, browY: 0, blush: 0.35,
       eyeX: 0, eyeY: 0, winkL: 0, winkR: 0,
     };
@@ -74,6 +75,8 @@ class VRMAvatar {
       uArmL: b('leftUpperArm'),  uArmR: b('rightUpperArm'),
       lArmL: b('leftLowerArm'),  lArmR: b('rightLowerArm'),
       handL: b('leftHand'),      handR: b('rightHand'),
+      uLegL: b('leftUpperLeg'),  uLegR: b('rightUpperLeg'),
+      lLegL: b('leftLowerLeg'),  lLegR: b('rightLowerLeg'),
     };
     this._hipsY = this.bones.hips ? this.bones.hips.position.y : 1.0;
 
@@ -237,6 +240,12 @@ class VRMAvatar {
     if (B.lArmR) B.lArmR.rotation.set(p.forearmR, THREE.MathUtils.clamp(-p.elbowR, 0, 2.6), 0);
     if (B.handL) B.handL.rotation.z = p.wristL;
     if (B.handR) B.handR.rotation.z = p.wristR;
+
+    // 足: x負=太ももを前へ上げる / z=横へ開く(左+・右-で外側) / ひざ x正=曲げる
+    if (B.uLegL) B.uLegL.rotation.set(p.legLx, 0, p.legLz);
+    if (B.uLegR) B.uLegR.rotation.set(p.legRx, 0, p.legRz);
+    if (B.lLegL) B.lLegL.rotation.x = p.kneeL;
+    if (B.lLegR) B.lLegR.rotation.x = p.kneeR;
 
     /* ======== 表情(VRM Expression) ======== */
     // 瞬き・ウインク

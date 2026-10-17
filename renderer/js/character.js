@@ -49,6 +49,7 @@ class Mochiko {
       shoulderLx: 0, shoulderLz: 0, shoulderRx: 0, shoulderRz: 0,
       elbowL: 0, elbowR: 0, forearmL: 0, forearmR: 0,
       wristL: 0, wristR: 0,
+      legLx: 0, legLz: 0, legRx: 0, legRz: 0, kneeL: 0, kneeR: 0,   // 足(太もも前後/横・ひざ)
       blink: 0,               // 0=開 1=閉
       mouthOpen: 0,           // リップシンク
       mouthSmile: 0.6,        // -1=への字 1=にっこり

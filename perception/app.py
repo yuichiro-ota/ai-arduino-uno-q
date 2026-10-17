@@ -10,16 +10,21 @@ perception/app.py — Orbbec Gemini 335 人検出サービス
   x: 右+ / y: 上+ / z: カメラからの距離 [m](カメラ座標系)
   見失ったら {"present": false}
   あわせて `perception/status` に {"alive": true, "present": bool} を2秒ごとに送る(画面のCAMERAランプ用)
+  IMU(加速度)から求めたカメラの傾きを `perception/tilt` に {"roll": 度, "pitch": 度} で10回/秒送る
+  (起動直後の向きを0度とする。roll: 左右の傾き / pitch: 前後の傾き)
 
 環境変数:
   MQTT_HOST       MQTTブローカー (default 127.0.0.1)。開発PCからは UNO Q の 192.168.3.80
   CAMERA_ROTATE   0/90/180/270 — カメラを縦置きする場合の回転補正
   PERCEPTION_FPS  配信頻度 [回/秒] (default 15)
+  IMU_ROLL_SIGN   傾きの左右が逆のとき -1 (default 1)
   DEBUG_SNAPSHOT  1 にすると5秒ごとにカメラ画像(検出枠つき)を debug/camera.jpg に保存する
                   (docker-compose で renderer/debug にマウント → http://<UNO Q>:8080/debug/camera.jpg で見られる)
 """
 import json
+import math
 import os
+import threading
 import time
 
 import cv2
@@ -34,6 +39,8 @@ NO_FRAME_RESTART_SEC = 10   # この秒数カメラから映像が来なけれ�
 STATUS_EVERY_SEC = 2        # perception/status を送る間隔
 FACE_MODEL = os.environ.get("FACE_MODEL", "/app/models/yunet.onnx")
 FACE_SCORE = float(os.environ.get("FACE_SCORE", "0.6"))   # 顔とみなす信頼度の下限
+IMU_ROLL_SIGN = float(os.environ.get("IMU_ROLL_SIGN", "1"))
+TILT_EVERY_SEC = 0.1        # perception/tilt を送る間隔
 DEBUG_SNAPSHOT = os.environ.get("DEBUG_SNAPSHOT", "0") == "1"
 SNAPSHOT_PATH = "/app/debug/camera.jpg"
 
@@ -49,6 +56,65 @@ def publish(payload: dict):
 
 def publish_status(present: bool):
     mq.publish("perception/status", json.dumps({"alive": True, "present": present}), qos=0)
+
+
+# ---------------- IMU (カメラの傾き) ----------------
+class TiltSensor:
+    """加速度センサーの重力方向から、起動時を基準にした左右(roll)・前後(pitch)の傾きを求める。
+    カメラ座標系(x:右 / y:下 / z:前)の重力ベクトルを想定。"""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.g = None          # 平滑化した重力ベクトル
+        self.base = None       # 基準(起動直後)の roll/pitch
+        self.samples = 0
+        self.last_pub = 0.0
+        self.roll = self.pitch = 0.0
+
+    def on_accel(self, x, y, z):
+        with self.lock:
+            if self.g is None:
+                self.g = [x, y, z]
+            else:   # 手ブレや振動を落とすローパス
+                self.g = [a + 0.15 * (b - a) for a, b in zip(self.g, (x, y, z))]
+            gx, gy, gz = self.g
+            roll = math.degrees(math.atan2(gx, gy))
+            pitch = math.degrees(math.atan2(gz, gy))
+            self.samples += 1
+            if self.samples == 50:          # 最初の約0.5秒ぶんで基準を決める
+                self.base = (roll, pitch)
+            if self.base is None:
+                return
+            self.roll = IMU_ROLL_SIGN * ((roll - self.base[0] + 180) % 360 - 180)
+            self.pitch = (pitch - self.base[1] + 180) % 360 - 180
+            now = time.time()
+            if now - self.last_pub >= TILT_EVERY_SEC:
+                self.last_pub = now
+                mq.publish("perception/tilt", json.dumps(
+                    {"roll": round(self.roll, 1), "pitch": round(self.pitch, 1)}), qos=0)
+
+
+tilt = TiltSensor()
+
+
+def start_imu(pipeline):
+    """加速度センサーを映像とは別に、コールバックで読む。使えなければ None を返して映像だけで動く"""
+    from pyorbbecsdk import OBSensorType
+    try:
+        sensor = pipeline.get_device().get_sensor(OBSensorType.ACCEL_SENSOR)
+        profile = sensor.get_stream_profile_list().get_stream_profile_by_index(0)
+
+        def on_frame(frame):
+            f = frame.as_accel_frame()
+            if f is not None:
+                tilt.on_accel(f.get_x(), f.get_y(), f.get_z())
+
+        sensor.start(profile, on_frame)
+        print("[perception] IMU (accel) started")
+        return sensor
+    except Exception as e:
+        print(f"[perception] IMU unavailable: {e}")
+        return None
 
 
 # ---------------- Orbbec Gemini 335 ----------------
@@ -144,6 +210,7 @@ def main():
 
     pipeline, (fx, fy, cx, cy) = open_camera()
     print(f"[perception] camera ready fx={fx:.1f} fy={fy:.1f} -> mqtt {MQTT_HOST}:1883")
+    imu = start_imu(pipeline)
 
     last_pub = 0.0
     last_log = 0.0
@@ -160,6 +227,8 @@ def main():
         df = fs.get_depth_frame() if fs else None
         if cf is None or df is None:
             if time.time() - last_frame > NO_FRAME_RESTART_SEC:
+                if imu:
+                    imu.stop()
                 pipeline.stop()
                 raise RuntimeError(f"no frames from camera for {NO_FRAME_RESTART_SEC}s")
             continue
@@ -214,8 +283,10 @@ def main():
         if now - last_log >= LOG_EVERY_SEC:
             state = (f"person x={found['x']:+.2f} y={found['y']:+.2f} z={found['z']:.2f}m"
                      if found else "no person")
+            imu_state = (f", tilt roll={tilt.roll:+.0f} pitch={tilt.pitch:+.0f}" if imu and tilt.base
+                         else (", imu waiting" if imu else ""))
             print(f"[perception] {state} ({hits} hits, {faces} faces, {no_depth} no-depth / "
-                  f"{LOG_EVERY_SEC}s, mqtt {'ok' if mq.is_connected() else 'disconnected'})")
+                  f"{LOG_EVERY_SEC}s, mqtt {'ok' if mq.is_connected() else 'disconnected'}{imu_state})")
             if DEBUG_SNAPSHOT:
                 save_snapshot(view, box, found, depth, scale)
             last_log, hits, faces, no_depth = now, 0, 0, 0

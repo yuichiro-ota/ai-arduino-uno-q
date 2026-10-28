@@ -304,10 +304,12 @@ def main():
 
 
 if __name__ == "__main__":
-    while True:
+    while rclpy.ok():   # docker stop (SIGTERM) で rclpy が終了したら抜ける
         try:
             main()
         except Exception as e:  # カメラ抜け等からの自動復帰
-            print(f"[perception] error: {e} — retry in 3s")
+            if not rclpy.ok():
+                break
+            print(f"[perception] error: {e} — retry in 3s", flush=True)
             publish_bool(pub_present, False)
             time.sleep(3)

@@ -11,11 +11,16 @@ ritsu_perception.py — 律の人検出 ROS 2 ノード (Orbbec Gemini 335)
   /ritsu/camera_alive    std_msgs/Bool     2秒ごとの生存通知 (画面の CAMERA ランプ用)
   /camera/imu            sensor_msgs/Imu   加速度の生データ (linear_acceleration のみ)
   /ritsu/tilt            geometry_msgs/Vector3  カメラの傾き [度] x=roll(左右) y=pitch(前後)。起動直後を0度とする
+  /ritsu/looking         std_msgs/Bool     顔がこちら(カメラ=画面)を向いているか。変化したとき+2秒ごと
+  /ritsu/hand_near       geometry_msgs/PointStamped  画面のすぐ前(TOUCH_DIST 以内)にある手などの位置 [m]
+                         (光学座標系)。ある間は毎回送る
 
 環境変数:
   CAMERA_ROTATE   0/90/180/270 — カメラを縦置きする場合の回転補正
   PERCEPTION_FPS  配信頻度 [回/秒] (default 15)
   IMU_ROLL_SIGN   傾きの左右が逆のとき -1 (default 1)
+  LOOK_YAW        顔の左右の向き(鼻のずれ/両目の間隔)がこれ以内なら「こちらを見ている」(default 0.2 ≒ 20度)
+  TOUCH_DIST      これより近い物を「画面のすぐ前の手」とみなす [m] (default 0.45)
   DEBUG_SNAPSHOT  1 にすると5秒ごとにカメラ画像(検出枠つき)を debug/camera.jpg に保存する
                   (docker-compose で renderer/debug にマウント → http://<UNO Q>:8080/debug/camera.jpg で見られる)
 """
@@ -40,6 +45,9 @@ FACE_MODEL = os.environ.get("FACE_MODEL", "/app/models/yunet.onnx")
 FACE_SCORE = float(os.environ.get("FACE_SCORE", "0.6"))   # 顔とみなす信頼度の下限
 IMU_ROLL_SIGN = float(os.environ.get("IMU_ROLL_SIGN", "1"))
 TILT_EVERY_SEC = 0.1        # /ritsu/tilt を送る間隔
+LOOK_YAW = float(os.environ.get("LOOK_YAW", "0.2"))      # 顔の左右の向き(鼻のずれ/両目の間隔)がこれ以内なら「こちらを見ている」
+TOUCH_DIST = float(os.environ.get("TOUCH_DIST", "0.45"))  # [m] これより近い物を「画面のすぐ前の手」とみなす
+TOUCH_AREA = 0.03           # 画面のすぐ前の物が画像のこの割合以上なら手とみなす(小さなノイズは無視)
 DEBUG_SNAPSHOT = os.environ.get("DEBUG_SNAPSHOT", "0") == "1"
 SNAPSHOT_PATH = "/app/debug/camera.jpg"
 
@@ -51,14 +59,20 @@ pub_present = node.create_publisher(Bool, "/ritsu/person_present", 10)
 pub_alive = node.create_publisher(Bool, "/ritsu/camera_alive", 10)
 pub_imu = node.create_publisher(Imu, "/camera/imu", 10)
 pub_tilt = node.create_publisher(Vector3, "/ritsu/tilt", 10)
+pub_looking = node.create_publisher(Bool, "/ritsu/looking", 10)
+pub_hand = node.create_publisher(PointStamped, "/ritsu/hand_near", 10)
 
 
-def publish_person(x, y, z):
+def publish_point(pub, x, y, z):
     msg = PointStamped()
     msg.header.stamp = node.get_clock().now().to_msg()
     msg.header.frame_id = "camera_color_optical_frame"
     msg.point.x, msg.point.y, msg.point.z = x, y, z
-    pub_person.publish(msg)
+    pub.publish(msg)
+
+
+def publish_person(x, y, z):
+    publish_point(pub_person, x, y, z)
 
 
 def publish_bool(pub, value: bool):
@@ -204,8 +218,63 @@ def save_snapshot(view, box, found, depth, scale):
     os.replace(tmp, SNAPSHOT_PATH)
 
 
+def face_yaw(f):
+    """YuNet の目・鼻の位置から顔の左右の向きを返す(0=正面、±0.3で約30度)。
+    両目を結ぶ線に沿った鼻のずれを両目の間隔で割るので、首をかしげても変わらない"""
+    re, le, nose = np.array(f[4:6]), np.array(f[6:8]), np.array(f[8:10])
+    e = le - re
+    dist = float(np.linalg.norm(e))
+    if dist < 1:
+        return 1.0
+    return float(np.dot(nose - (re + le) / 2, e / dist) / dist)
+
+
+class LookTracker:
+    """こちらを向いている状態が続いたら true、向いていない(顔が無い)状態が続いたら false にする"""
+    ON_FRAMES, OFF_FRAMES = 3, 6     # 8fps で約0.4秒 / 約0.75秒
+
+    def __init__(self):
+        self.state = False
+        self.streak = 0
+        self.last_pub = 0.0
+
+    def update(self, frontal):
+        if frontal != self.state:
+            self.streak += 1
+            if self.streak >= (self.ON_FRAMES if frontal else self.OFF_FRAMES):
+                self.state, self.streak = frontal, 0
+                self.publish()
+        else:
+            self.streak = 0
+        if time.time() - self.last_pub > STATUS_EVERY_SEC:
+            self.publish()
+
+    def publish(self):
+        publish_bool(pub_looking, self.state)
+        self.last_pub = time.time()
+
+
+def detect_hand_near(depth, scale, face_box, intr):
+    """画面のすぐ前(TOUCH_DIST 以内)にある物(手)の位置 {x,y,z} を返す。無ければ None。
+    顔の枠の中は除く(近づいた顔を手と間違えないように)。1/4 に間引いて軽くする"""
+    fx, fy, cx, cy = intr
+    step = 4
+    d = depth[::step, ::step].astype(np.float32) * scale / 1000.0      # [m]
+    near = (d > 0.12) & (d < TOUCH_DIST)
+    if face_box:
+        x, y, w, h = face_box                                           # センサー座標の顔の枠
+        near[max(0, (y - h // 4) // step):(y + h + h // 4) // step + 1,
+             max(0, (x - w // 4) // step):(x + w + w // 4) // step + 1] = False
+    if near.mean() < TOUCH_AREA:
+        return None
+    vs, us = np.nonzero(near)
+    z = float(np.median(d[near]))
+    u, v = float(us.mean()) * step, float(vs.mean()) * step
+    return {"x": (u - cx) / fx * z, "y": (v - cy) / fy * z, "z": z}
+
+
 def detect_face(detector, view):
-    """最も大きい(=近い)顔を返す: ((x, y, w, h), (目の中点 u, v), score)。無ければ None"""
+    """最も大きい(=近い)顔を返す: ((x, y, w, h), (目の中点 u, v), score, 顔の向き)。無ければ None"""
     vh, vw = view.shape[:2]
     detector.setInputSize((vw, vh))
     _, faces = detector.detect(cv2.cvtColor(view, cv2.COLOR_RGB2BGR))
@@ -215,7 +284,7 @@ def detect_face(detector, view):
     x, y, w, h = (int(v) for v in f[:4])
     eye_u = int((f[4] + f[6]) / 2)   # 右目(4,5)と左目(6,7)の中点
     eye_v = int((f[5] + f[7]) / 2)
-    return (x, y, w, h), (eye_u, eye_v), float(f[14])
+    return (x, y, w, h), (eye_u, eye_v), float(f[14]), face_yaw(f)
 
 
 def main():
@@ -233,6 +302,10 @@ def main():
     hits = 0
     faces = 0        # 顔は見つかった回数(深度が取れずに捨てた分も含む)
     no_depth = 0     # 顔はあったが深度が取れなかった回数
+    looking = LookTracker()
+    hand_streak = 0  # 画面のすぐ前に物がある連続フレーム数(1フレームだけのノイズは無視)
+    hand = None
+    yaw = None
     while True:
         fs = pipeline.wait_for_frames(200)
         cf = fs.get_color_frame() if fs else None
@@ -257,9 +330,10 @@ def main():
 
         found = None
         box = None
+        yaw = None
         if det:
             faces += 1
-            box, (eye_u, eye_v), score = det
+            box, (eye_u, eye_v), score, yaw = det
             h, w = color.shape[:2]
             u, v = to_sensor_uv(eye_u, eye_v, w, h)
             u = int(np.clip(u, 2, w - 3))
@@ -275,6 +349,20 @@ def main():
                 found = {"x": (u - cx) / fx * z,
                          "y": (v - cy) / fy * z,     # 光学座標系なので y は下が+
                          "z": z}
+
+        looking.update(found is not None and abs(yaw) < LOOK_YAW)
+
+        # 画面のすぐ前の手(顔の枠はセンサー座標に戻してから除く)
+        sbox = None
+        if box:
+            h, w = color.shape[:2]
+            (u1, v1), (u2, v2) = (to_sensor_uv(box[0], box[1], w, h),
+                                  to_sensor_uv(box[0] + box[2], box[1] + box[3], w, h))
+            sbox = (min(u1, u2), min(v1, v2), abs(u2 - u1), abs(v2 - v1))
+        hand = detect_hand_near(depth, scale, sbox, (fx, fy, cx, cy))
+        hand_streak = hand_streak + 1 if hand else 0
+        if hand_streak >= 2:
+            publish_point(pub_hand, hand["x"], hand["y"], hand["z"])
 
         if found:
             publish_person(found["x"], found["y"], found["z"])
@@ -294,6 +382,8 @@ def main():
         if now - last_log >= LOG_EVERY_SEC:
             state = (f"person x={found['x']:+.2f} y={found['y']:+.2f} z={found['z']:.2f}m"
                      if found else "no person")
+            state += (f", yaw={yaw:+.2f}{' looking' if looking.state else ''}" if yaw is not None else "")
+            state += f", hand z={hand['z']:.2f}m" if hand else ""
             imu_state = (f", tilt roll={tilt.roll:+.0f} pitch={tilt.pitch:+.0f}" if imu and tilt.base
                          else (", imu waiting" if imu else ""))
             print(f"[perception] {state} ({hits} hits, {faces} faces, {no_depth} no-depth / "

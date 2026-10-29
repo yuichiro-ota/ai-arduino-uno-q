@@ -159,10 +159,19 @@ function greetingFor(ctx) {
 }
 const NEAR_LINES = ['わっ……ち、近いです……!', 'ふふっ、そんなに近くで見られると照れちゃいます。',
                     'あの……ちょっとだけ、近いかも……'];
-const REACT_COOLDOWN = 45;
-// LLM に独り言を作らせるときの話題(毎回1つ選ぶ)
+const REACT_COOLDOWN = 45;   // [秒] 挨拶・目が合った・近いの反応どうしの間隔
+const EYE_CONTACT_LINES = [['wink', 'happy', 'あ、目が合いましたね。ふふっ。'],
+                           ['shy', 'shy', 'じーっ……ふふっ、見つめ合っちゃいましたね。'],
+                           ['tiltL', 'happy', 'どうかしましたか?何でも聞いてくださいね。']];
+const APPROACH_LINES = ['わっ……ふふっ、どうしました?', 'いらっしゃいませ。ゆっくり見ていってくださいね。'];
+const SEE_OFF_LINES = ['またお越しくださいね。', 'ありがとうございました。また来てくださいね。', 'いってらっしゃい。お気をつけて。'];
+const TOUCH_LINES = ['ぺたっ。……ふふっ、ガラス越しにタッチですね。', '手、あったかそうですね。',
+                     'ここから出られたらいいのに……なんて。ふふっ。', 'えへへ、ハイタッチです。'];
+const TOUCH_COOLDOWN = 20;   // [秒] 手を合わせる反応の間隔
+// LLM の独り言で thinking / talkGesture1 が選ばれたときに代わりに使う動き
 const IDLE_LLM_MOTIONS = ['nodSlow', 'tiltL', 'tiltR', 'lookAround', 'rhythmSway', 'happyBounce',
                           'wink', 'stretch', 'thinking', 'talkGesture2', 'mojimoji'];
+// LLM に独り言を作らせるときの話題(毎回1つ選ぶ)
 const IDLE_TOPICS = ['今の時間帯のこと', '今の季節のこと', '季節の行事や、今日が何曜日か',
                      '目の前の人(いれば)へのさりげない声かけ', '看板娘のお仕事のこと',
                      '好きな食べ物や飲み物のこと', '今の天気や気温のこと(状況に天気が無ければ空気の感じを想像して)',
@@ -222,9 +231,16 @@ class RitsuBrain {
     this.lastChat = -Infinity;   // 最後に話しかけられた時刻(会話中のカメラ寄り用)
     this.lastReact = -Infinity;  // 来た・帰った・近いに反応した時刻
     this.recentLines = [];       // 最近言った独り言(続けて同じことを言わないように)
-    this.ctx.on('arrive', absentSec => this._onArrive(absentSec));
-    this.ctx.on('leave', stayedSec => this._onLeave(stayedSec));
+    this.greeted = false;        // 今回の来訪で挨拶したか
+    this.absentSec = 0;          // 今回の来訪の前に、いなかった秒数
+    this.lastEyeContact = -Infinity;
+    this.lastTouch = -Infinity;
+    this.ctx.on('arrive', absentSec => { this.greeted = false; this.absentSec = absentSec; this.visitStart = performance.now(); });
+    this.ctx.on('look', () => this._onLook());
+    this.ctx.on('approach', () => this._onApproach());
+    this.ctx.on('leave', (stayedSec, dir, visit) => this._onLeave(stayedSec, dir, visit));
     this.ctx.on('near', () => this._onNear());
+    this.ctx.on('touch', dir => this._onTouch(dir));
   }
 
   async chat(userText) {
@@ -380,25 +396,65 @@ ${recent}`;
     return true;
   }
 
-  _onArrive(absentSec) {
-    if (absentSec < 60) {   // ちょっと離れて戻ってきた
-      if (absentSec > 15 && Math.random() < 0.5 && this._canReact())
-        this.act({ text: 'おかえりなさい。', motion: 'wave', emotion: 'happy', source: 'idle' });
-      return;
-    }
-    if (!this._canReact()) return;
-    const far = this.ctx.personDistance === 'far';
-    this.act({ text: greetingFor(this.ctx) + (far ? 'よかったら、近くへどうぞ。' : ''),
-               motion: far ? 'comeHere' : Math.random() < 0.5 ? 'wave' : 'ojigiKawaii',
-               emotion: 'happy', source: 'idle' });
+  /** 来訪の挨拶の言葉。ほんの少し見失っただけなら null */
+  _greeting() {
+    if (this.absentSec <= 15) return null;
+    if (this.absentSec < 60) return 'おかえりなさい。';
+    return greetingFor(this.ctx) + (this.ctx.personDistance === 'far' ? 'よかったら、近くへどうぞ。' : '');
   }
 
-  _onLeave(stayedSec) {
-    if (stayedSec < 15 || !this._canReact()) return;
+  /** ⑤ 目が合った: まだ挨拶していなければ挨拶(通り過ぎるだけでこちらを見ない人には話しかけない)。
+   *  挨拶済みなら、ときどき「目が合いましたね」 */
+  _onLook() {
+    if (!this.greeted) {
+      const text = this._greeting();
+      if (!text) { this.greeted = true; return; }
+      if (!this._canReact()) return;              // 会話中などは、次に目が合ったときに挨拶する
+      this.greeted = true;
+      const far = this.ctx.personDistance === 'far';
+      this.act({ text, motion: far ? 'comeHere' : Math.random() < 0.5 ? 'wave' : 'ojigiKawaii',
+                 emotion: 'happy', source: 'idle' });
+      return;
+    }
+    const now = performance.now();
+    if ((now - this.lastEyeContact) / 1000 < 120 || Math.random() > 0.4 || !this._canReact()) return;
+    this.lastEyeContact = now;
+    const [motion, emotion, text] = EYE_CONTACT_LINES[Math.floor(Math.random() * EYE_CONTACT_LINES.length)];
+    this.act({ text, motion, emotion, source: 'idle' });
+  }
+
+  /** ① こちらを見ながら近づいてきた: 見上げる(まだなら挨拶も)。
+   *  遠くで挨拶した直後に近づいてくることが多いので、挨拶の間隔(REACT_COOLDOWN)は待たない */
+  _onApproach() {
+    const now = performance.now();
+    if (!this.ctx.lookedWithin(3) || this.busy || (now - this.lastReact) / 1000 < 3) return;
+    this.lastReact = this.lastInteraction = now;
+    const text = (!this.greeted && this._greeting()) || APPROACH_LINES[Math.floor(Math.random() * APPROACH_LINES.length)];
+    this.greeted = true;
+    this.act({ text, motion: 'lookUp', emotion: 'happy', source: 'idle' });
+  }
+
+  /** ② 去った: 目が合った・挨拶した・話した・しばらくいた人だけ、去った側を向いて手を振る */
+  _onLeave(stayedSec, dir, visit) {
+    const talked = this.lastChat > (this.visitStart || 0);
+    const engaged = (visit && visit.looked) || this.greeted || talked || stayedSec >= 15;
+    this.greeted = false;
+    const now = performance.now();
+    if (!engaged || this.busy || (now - this.lastReact) / 1000 < 3) return;   // 見送りは挨拶の間隔を待たない
+    this.lastReact = this.lastInteraction = now;
     const night = ['night', 'lateNight'].includes(this.ctx.timeOfDay());
     const text = night ? 'おやすみなさい。またお越しくださいね。'
-               : ['またお越しくださいね。', 'ありがとうございました。また来てくださいね。'][Math.floor(Math.random() * 2)];
-    this.act({ text, motion: 'byebye', emotion: 'happy', source: 'idle' });
+               : SEE_OFF_LINES[Math.floor(Math.random() * SEE_OFF_LINES.length)];
+    this.act({ text, motion: dir > 0 ? 'seeOffR' : dir < 0 ? 'seeOffL' : 'byebye', emotion: 'happy', source: 'idle' });
+  }
+
+  /** ③ 画面のすぐ前に手: 内側から同じ側に手を合わせる */
+  _onTouch(dir) {
+    const now = performance.now();
+    if (this.busy || (now - this.lastTouch) / 1000 < TOUCH_COOLDOWN) return;
+    this.lastTouch = this.lastReact = this.lastInteraction = now;
+    this.act({ text: TOUCH_LINES[Math.floor(Math.random() * TOUCH_LINES.length)],
+               motion: dir > 0 ? 'glassTouchR' : 'glassTouchL', emotion: 'happy', source: 'idle' });
   }
 
   _onNear() {

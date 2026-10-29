@@ -47,4 +47,6 @@ services:
       - PERCEPTION_FPS=${PERCEPTION_FPS:-8}         # UNO Q の CPU に合わせた検出回数
       - DEBUG_SNAPSHOT=${DEBUG_SNAPSHOT:-0}
       - IMU_ROLL_SIGN=${IMU_ROLL_SIGN:--1}          # Gemini 335 実機では -1 で傾けた側へよろける
+      - LOOK_YAW=${LOOK_YAW:-0.2}                   # 顔の向きがこれ以内なら「こちらを見ている」(大きいほど甘い)
+      - TOUCH_DIST=${TOUCH_DIST:-0.45}              # [m] これより近い手に、律が内側から手を合わせる
     command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && exec python3 ritsu_perception.py"]

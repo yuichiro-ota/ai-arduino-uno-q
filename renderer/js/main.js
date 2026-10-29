@@ -8,6 +8,8 @@
  *   購読 /ritsu/person_present std_msgs/Bool
  *   購読 /ritsu/camera_alive   std_msgs/Bool    人検出の生存通知(2秒ごと。CAMERAランプ)
  *   購読 /ritsu/tilt           geometry_msgs/Vector3  カメラの傾き[度] x=roll。左右に大きく傾くと「おっとっと」
+ *   購読 /ritsu/looking        std_msgs/Bool    顔がこちらを向いているか (挨拶は目が合った人にだけ)
+ *   購読 /ritsu/hand_near      geometry_msgs/PointStamped  画面のすぐ前の手 (内側から手を合わせる)
  *   発行 /ritsu/say            std_msgs/String  JSON {"text":"...","emotion":"happy","motion":"wave","source":"llm|fallback|idle|idle-llm"}
  *   発行 /ritsu/thinking       std_msgs/Bool    返事を考え中
  * =========================================================================
@@ -81,8 +83,8 @@
   // 表情はモーションと字幕が終わったらいつもの表情に戻す(驚いた顔のまま残らないように)
   // のぞき込みはカメラが戻った時点(stepCamera から resetEmotionAfterCamera を呼ぶ)、
   // 振り向きはモーション(首の戻り)が終わった時点で戻す
-  const CAMERA_MOTIONS = ['peek'];
-  const MOTION_END_MOTIONS = ['noticeL', 'noticeR', 'ottotoL', 'ottotoR'];
+  const CAMERA_MOTIONS = ['peek', 'glassTouchL', 'glassTouchR'];
+  const MOTION_END_MOTIONS = ['noticeL', 'noticeR', 'ottotoL', 'ottotoR', 'seeOffL', 'seeOffR', 'lookUp'];
   let emotionTimer = null;
   let emotionUntilCamera = false;
   function resetEmotionAfterCamera() {
@@ -132,6 +134,8 @@
   let headRestReady = false;
   let talkK = 0;              // 0:全身 .. 1:会話の寄り
   let peekT = -1;             // -1: のぞき込み中でない
+  let peekDist = 0.55;        // のぞき込みで寄る距離 [m] (手を合わせるときは手も入るよう少し引く)
+  let peekSide = 0;           // 寄る先を左右へずらす [m] (手を合わせるときは手の側へ)
   let panT = -1, panDir = 0;  // 振り向き中のカメラの振れ
   const v = { basePos: new THREE.Vector3(), baseLook: new THREE.Vector3(),
               talkPos: new THREE.Vector3(), talkLook: new THREE.Vector3(),
@@ -140,7 +144,7 @@
   const envelope = (t, tin, thold, tout) =>
     t < tin ? ease(t / tin) : t < tin + thold ? 1 : t < tin + thold + tout ? 1 - ease((t - tin - thold) / tout) : -1;
 
-  function startPeek() { if (peekT < 0) peekT = 0; }
+  function startPeek(dist = 0.55, side = 0) { if (peekT < 0) { peekT = 0; peekDist = dist; peekSide = side; } }
   function startPan(dir) { panT = 0; panDir = dir; }
 
   function stepCamera(dt, now) {
@@ -170,7 +174,8 @@
       if (pk < 0) { peekT = -1; pk = 0; resetEmotionAfterCamera(); }
     }
     headPos(v.head).y += 0.03;
-    v.near.set(v.head.x, v.head.y, v.head.z + 0.55);
+    v.head.x += peekSide;
+    v.near.set(v.head.x, v.head.y, v.head.z + peekDist);
     camera.position.lerpVectors(v.basePos, v.near, pk);
     camera.lookAt(v.look.lerpVectors(v.baseLook, v.head, pk));
     mochiko.lookOverride = pk > 0.2 ? camera.position : null;
@@ -222,7 +227,9 @@
       if (emotion) setEmotionFor(emotion, motion, text);
       if (motion) player.play(motion);
       if (motion === 'peek') startPeek();
+      if (motion === 'glassTouchL' || motion === 'glassTouchR') startPeek(1.15, motion === 'glassTouchR' ? 0.12 : -0.12);
       if (motion === 'noticeL' || motion === 'noticeR') startPan(motion === 'noticeR' ? 1 : -1);
+      if (motion === 'seeOffL' || motion === 'seeOffR') startPan(motion === 'seeOffR' ? 1 : -1);
       if (text) {
         showSubtitle(text);
         if (RITSU_CFG.kiosk) pubJson('/ritsu/say', { text, emotion, motion, source });
@@ -244,9 +251,13 @@
     }
     ros.sub('/ritsu/tilt', 'geometry_msgs/Vector3', m => onTilt(m.x));
     ros.sub('/ritsu/camera_alive', 'std_msgs/Bool', () => { camSeenAt = performance.now(); });
+    ros.sub('/ritsu/looking', 'std_msgs/Bool', m => ctx.onLooking(m.data));
+    ros.sub('/ritsu/hand_near', 'geometry_msgs/PointStamped', m => {
+      if (m.point.z > 0) ctx.onHand(m.point.x / m.point.z);
+    });
     ros.sub('/ritsu/person', 'geometry_msgs/PointStamped', m => {
       camSeenAt = personSeenAt = performance.now();
-      if (m.point.z > 0) ctx.onPerson(m.point.z);
+      if (m.point.z > 0) ctx.onPerson(m.point.z, m.point.x / m.point.z);
       // 光学座標系[m](x:右 / y:下 / z:前) → 視線オフセット(-1..1)
       const { x, y } = m.point;
       const z = Math.max(0.3, m.point.z || 1.0);
@@ -318,6 +329,9 @@
     ottoto: (dir = 1) => brain.act({ motion: dir > 0 ? 'ottotoR' : 'ottotoL', emotion: 'surprised' }),
     ctx, say: text => brain.act({ text, motion: 'talkGesture1', emotion: 'happy' }),
     // カメラ無しで人の検出を試す: RITSU.person(1.2) を1秒ごとに数回呼ぶ(止めると8秒後に「帰った」扱い)
-    person: (z = 1.2) => ctx.onPerson(z),
+    person: (z = 1.2, xn = 0) => ctx.onPerson(z, xn),
+    look: (on = true) => ctx.onLooking(on),     // 目が合ったことにする
+    hand: (xn = 0.3) => ctx.onHand(xn),         // 画面のすぐ前に手が来たことにする(xn>0 はカメラから見て右=画面の左)
+    act: motion => brain.act({ motion }),
   };
 })();

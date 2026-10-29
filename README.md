@@ -16,6 +16,10 @@ iPhone ─/remote─▶ nginx:8080 ─ /llm/* (+APIキー) ───────
 - **iPhone などから話しかけられる**: `http://192.168.3.80:8080/remote` を開くと、入力ページから画面の律に話しかけ、返事を受け取れる（複数台で同時に使える）
 - 深度カメラで人の顔の位置を測り（`/ritsu/person`）、律の目線がその人を追う
 - カメラ（IMU）が左右に15度以上傾くと、傾いた側へ「おっとっと」とよろける
+- **目が合った人にだけ挨拶する**: 顔の向き（目と鼻の位置）からこちらを見ているかを判定し、通り過ぎるだけの人には話しかけない
+- **近づいてくる人を見上げる**: こちらを見ながら近づいてくると、顔を上げて「わぁ」と迎える
+- **去っていく人を見送る**: 画面の端から去ったらその側を向いて手を振る（目が合った・挨拶した・話した・しばらくいた人だけ）
+- **ガラスに手**: 画面のすぐ前（45cm以内）に手を出すと、律も内側から同じ側に手を合わせる
 - 会話が無いと1〜2分に1回カメラが目元まで寄ってのぞき込む、話しかけると胸から上へ寄る、物音に振り向く
 - 一定間隔で独り言やダンスをする暇つぶし行動
 - **今の状況に合わせた会話**（`renderer/js/context.js`）: 日時・時間帯・季節・平日/土日/祝日（振替休日を含む）・季節の行事・天気（Open-Meteo、`config.js` の `weather` で場所を設定）・カメラ前の人の距離を LLM に渡し、会話が無い間は約20秒に1回しゃべり、そのうち約30秒に1回は LLM が状況から毎回違う独り言を作る（`config.js` の `idleMinSec` / `idleMaxSec` / `idleSpeakChance` / `llmIdleChance`）。残りは状況に合わせて用意したセリフから選ぶ。人が来たら時間帯に合った挨拶、帰ったらお見送り、とても近いと照れる
@@ -121,6 +125,8 @@ sudo reboot
 | `/ritsu/person` | `geometry_msgs/PointStamped` | 人検出 → 画面の律 | 顔（両目の中点）の位置 [m]。`camera_color_optical_frame`（x:右、y:下、z:前） |
 | `/ritsu/person_present` | `std_msgs/Bool` | 人検出 → | 人を見失ったら false |
 | `/ritsu/camera_alive` | `std_msgs/Bool` | 人検出 → 画面の律 | 2秒ごとの生存通知（画面右上の CAMERA ランプ: 緑=人を検出中、黄=人はいない、灰=通知なし） |
+| `/ritsu/looking` | `std_msgs/Bool` | 人検出 → 画面の律 | 顔がこちら（カメラ）を向いているか。変化したとき＋2秒ごと |
+| `/ritsu/hand_near` | `geometry_msgs/PointStamped` | 人検出 → 画面の律 | 画面のすぐ前（`TOUCH_DIST` 以内）の手の位置 [m]、光学座標系。ある間は毎回 |
 | `/ritsu/tilt` | `geometry_msgs/Vector3` | 人検出 → 画面の律 | カメラの傾き [度]。x=roll（左右）、y=pitch（前後）。起動時を0度。左右15度以上で「おっとっと」（8度未満に戻るまで再発動しない） |
 | `/camera/imu` | `sensor_msgs/Imu` | 人検出 → | 加速度の生データ（`linear_acceleration` のみ） |
 
@@ -137,7 +143,7 @@ docker compose up -d --build              # 律の画面・rosbridge・人検出
 docker logs -f ritsu-camera               # 検出状況が5秒ごとに出る
 ```
 
-- 環境変数: `CAMERA_ROTATE`（カメラを縦置きしたとき 90/180/270）、`PERCEPTION_FPS`（1秒あたりの検出回数、既定 8）、`IMU_ROLL_SIGN`（傾けた向きと律がよろける向き。Gemini 335 実機に合わせて既定は -1）、`DEBUG_SNAPSHOT`（1 で確認用画像を `:8080/debug/camera.jpg` に出す。LAN 内の誰でも見えるので確認後は外す）
+- 環境変数: `CAMERA_ROTATE`（カメラを縦置きしたとき 90/180/270）、`PERCEPTION_FPS`（1秒あたりの検出回数、既定 8）、`IMU_ROLL_SIGN`（傾けた向きと律がよろける向き。Gemini 335 実機に合わせて既定は -1）、`LOOK_YAW`（こちらを見ているとみなす顔の向き、既定 0.2 ≒ 20度。挨拶されにくければ大きく）、`TOUCH_DIST`（手を合わせる距離、既定 0.45m）、`DEBUG_SNAPSHOT`（1 で確認用画像を `:8080/debug/camera.jpg` に出す。LAN 内の誰でも見えるので確認後は外す）
 - カメラから10秒映像が来なければ、自動で開き直します。
 - 開発PC（WSL）で使うときは、Windows 側で usbipd-win を使ってカメラを WSL に渡します（`usbipd bind --busid <BUSID>` → `usbipd attach --wsl --busid <BUSID>`）。
 
@@ -151,4 +157,7 @@ RITSU.list()                // モーション一覧
 RITSU.brain.chat('こんにちは') // 会話テスト
 RITSU.ctx.describe()        // LLM に渡している「今の状況」
 RITSU.person(1.2)           // カメラ無しで人が来たことにする(距離[m])。8秒呼ばないと帰った扱い
+RITSU.look(true)            // 目が合ったことにする
+RITSU.hand(0.3)             // 画面のすぐ前に手が来たことにする(0.3秒以上続けて呼ぶ)
+RITSU.act('glassTouchR')    // モーションをカメラワーク付きで再生
 ```

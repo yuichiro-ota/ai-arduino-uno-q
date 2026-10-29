@@ -80,6 +80,8 @@ const SEASON_EVENTS = [
 ];
 
 const DISTANCE = { NEAR: 0.7, FAR: 1.8 };   // [m] これより近い/遠い
+const APPROACH_SPEED = 0.35;   // [m/s] これより速く近づいたら「近づいてくる」
+const EDGE_XN = 0.45;          // |x/z| がこれより大きい位置で見失ったら画面の端から去った(約24度)
 
 /* ---- 天気 (WMO 天気コード → 日本語・種類) ---- */
 function weatherName(code) {
@@ -98,26 +100,39 @@ class RitsuContext {
     this.weather = null;            // { text, kind, temp, feels, max, min, rainProb, rainSoon, at }
     if (weather && weather.lat != null) this._startWeather(weather);
     this.personZ = null;            // 最後に見えた顔までの距離 [m]
+    this.personXn = 0;              // 最後に見えた顔の左右の位置 x/z (カメラから見て右が+)
     this.personLastSeen = -Infinity;
     this.personSince = null;        // 今回見え始めた時刻(いなくなったら null)
-    this.listeners = { arrive: [], leave: [], near: [] };
+    this.looking = false;           // 顔がこちらを向いているか (/ritsu/looking)
+    this.lookedAt = -Infinity;      // 最後にこちらを向いた時刻
+    this.visit = null;              // 今回の来訪 { looked, approached }
+    this.listeners = { arrive: [], leave: [], near: [], look: [], approach: [], touch: [] };
     this._nearNotified = false;
-    setInterval(() => this._checkLeave(), 1000);
+    this._track = [];               // 直近の [時刻, z, xn] (近づく速さ・去った方向用)
+    this._handSince = null;         // 画面のすぐ前に手が来た時刻
+    this._handLast = -Infinity;
+    setInterval(() => this._checkLeave(), 250);
   }
 
   on(ev, cb) { this.listeners[ev].push(cb); }
   _emit(ev, ...a) { for (const cb of this.listeners[ev]) cb(...a); }
 
-  /* ---- カメラ(ROS 2 の /ritsu/person から呼ばれる) ---- */
-  onPerson(z) {
+  /* ---- カメラ(ROS 2 の /ritsu/person から呼ばれる)。xn = x/z ---- */
+  onPerson(z, xn = 0) {
     const now = performance.now();
     const absent = now - this.personLastSeen;
     this.personZ = z;
+    this.personXn = xn;
     this.personLastSeen = now;
+    this._track.push([now, z, xn]);
+    while (this._track.length && now - this._track[0][0] > 1500) this._track.shift();
     if (this.personSince === null) {
       this.personSince = now;
       this._nearNotified = false;
+      this.visit = { looked: false, approached: false };
+      this._track = [[now, z, xn]];
       this._emit('arrive', absent / 1000);   // 前回いなくなってからの秒数
+      if (this.looking) this._onLookStart();
     }
     if (z < DISTANCE.NEAR && !this._nearNotified) {
       this._nearNotified = true;
@@ -125,17 +140,64 @@ class RitsuContext {
     } else if (z > DISTANCE.NEAR + 0.2) {
       this._nearNotified = false;
     }
+    // ① 近づいてくる: 直近1秒ほどで APPROACH_SPEED [m/s] より速く近づいた(来訪ごとに1回)
+    const old = this._track.find(([t]) => now - t >= 700);
+    if (old && !this.visit.approached && z > DISTANCE.NEAR && z < 2.8) {
+      const speed = (old[1] - z) / ((now - old[0]) / 1000);
+      if (speed > APPROACH_SPEED) {
+        this.visit.approached = true;
+        this._emit('approach', z);
+      }
+    }
   }
 
-  /** 顔を見失ってから LEAVE_SEC 秒で「いなくなった」とみなす(横を向いた等の一瞬の見失いは無視) */
+  /** ⑤ 顔がこちらを向いているか (/ritsu/looking から呼ばれる) */
+  onLooking(on) {
+    const was = this.looking;
+    this.looking = on;
+    if (on && !was) this._onLookStart();
+  }
+  _onLookStart() {
+    this.lookedAt = performance.now();
+    if (!this.personPresent) return;      // 人の位置がまだ届いていない(届いたら onPerson から呼ばれる)
+    const first = !this.visit.looked;
+    this.visit.looked = true;
+    this._emit('look', first);
+  }
+  /** 直近 sec 秒以内にこちらを向いたか */
+  lookedWithin(sec) { return this.looking || performance.now() - this.lookedAt < sec * 1000; }
+
+  /** ③ 画面のすぐ前の手 (/ritsu/hand_near から呼ばれる)。xn = x/z。0.3秒続いたら1回だけ知らせる */
+  onHand(xn) {
+    const now = performance.now();
+    if (now - this._handLast > 600) this._handSince = now;     // 途切れたら数え直し
+    this._handLast = now;
+    if (this._handSince !== null && now - this._handSince > 300) {
+      this._handSince = null;                                   // 手を離すまで次は知らせない
+      this._emit('touch', xn > 0 ? -1 : 1);                     // 画面上の左右(カメラの右 = 画面の左)
+    }
+  }
+
+  /** ② 去った: 画面の端で見失ったらすぐ、遠ざかりながら見失ったら少し待って、それ以外は LEAVE_SEC 秒で。
+   *  去った方向(画面上の左右 -1/1、分からなければ 0)も知らせる */
   _checkLeave() {
     const LEAVE_SEC = 8;
     if (this.personSince === null) return;
     const now = performance.now();
-    if (now - this.personLastSeen < LEAVE_SEC * 1000) return;
+    const lost = (now - this.personLastSeen) / 1000;
+    if (lost < 0.8) return;
+    const tr = this._track;
+    const first = tr[0], last = tr[tr.length - 1];
+    const dt = last && first ? (last[0] - first[0]) / 1000 : 0;
+    const edge = last && Math.abs(last[2]) > EDGE_XN;
+    const receding = dt > 0.3 && (last[1] - first[1]) / dt > 0.2;   // 0.2 m/s 以上で遠ざかっていた
+    if (!(edge || (receding && lost > 2.5) || lost > LEAVE_SEC)) return;
+    const dir = last && Math.abs(last[2]) > 0.15 ? (last[2] > 0 ? -1 : 1) : 0;
     const stayed = (this.personLastSeen - this.personSince) / 1000;
+    const visit = this.visit;
     this.personSince = null;
-    this._emit('leave', stayed);
+    this.visit = null;
+    this._emit('leave', stayed, dir, visit);
   }
 
   /* ---- 天気 ---- */
@@ -178,6 +240,8 @@ class RitsuContext {
   }
 
   get personPresent() { return this.personSince !== null && performance.now() - this.personLastSeen < 2000; }
+
+  get visitSec() { return this.personSince === null ? 0 : (performance.now() - this.personSince) / 1000; }
 
   /** 'near' | 'mid' | 'far' | null */
   get personDistance() {
@@ -247,7 +311,8 @@ class RitsuContext {
       const DIST = { near: 'すぐ目の前(とても近い)', mid: '話しやすい距離', far: '少し離れたところ' };
       const sec = Math.round((performance.now() - this.personSince) / 1000);
       const stay = sec < 10 ? '今来たところで' : sec < 60 ? `${sec}秒前から` : `${Math.round(sec / 60)}分前から`;
-      lines.push(`目の前の人: ${DIST[this.personDistance]}(約${this.personZ.toFixed(1)}m)にいる。${stay}見えている`);
+      lines.push(`目の前の人: ${DIST[this.personDistance]}(約${this.personZ.toFixed(1)}m)にいる。${stay}見えている。` +
+                 (this.looking ? '今こちらを見ている' : 'こちらは見ていない'));
     } else {
       lines.push('目の前の人: カメラには誰も映っていない(画面の向こうから話しかけられている)');
     }

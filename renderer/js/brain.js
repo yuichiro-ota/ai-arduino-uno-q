@@ -7,7 +7,7 @@
 const RITSU_CFG = (() => {
   const cfg = Object.assign({
     llmUrl: '/llm', llmModel: 'chat',
-    llmTimeoutSec: 30, idleMinSec: 25, idleMaxSec: 60, peekMinSec: 60, peekMaxSec: 120,
+    llmTimeoutSec: 30, llmIdleChance: 0.5, idleMinSec: 25, idleMaxSec: 60, peekMinSec: 60, peekMaxSec: 120,
     pixelRatio: 1.5, antialias: true, petals: 40, simpleMaterials: false,
   }, window.RITSU_CONFIG || {});
   const q = new URLSearchParams(location.search);
@@ -141,7 +141,13 @@ function greetingFor(ctx) {
 }
 const NEAR_LINES = ['わっ……ち、近いです……!', 'ふふっ、そんなに近くで見られると照れちゃいます。',
                     'あの……ちょっとだけ、近いかも……'];
-const REACT_COOLDOWN = 45;   // [秒] 来た・帰った・近いの反応どうしの間隔
+const REACT_COOLDOWN = 45;
+// LLM に独り言を作らせるときの話題(毎回1つ選ぶ)
+const IDLE_LLM_MOTIONS = ['nodSlow', 'tiltL', 'tiltR', 'lookAround', 'rhythmSway', 'happyBounce',
+                          'wink', 'stretch', 'thinking', 'talkGesture2', 'mojimoji'];
+const IDLE_TOPICS = ['今の時間帯のこと', '今の季節のこと', '季節の行事や、今日が何曜日か',
+                     '目の前の人(いれば)へのさりげない声かけ', '看板娘のお仕事のこと',
+                     '好きな食べ物や飲み物のこと', '天気や空気の感じを想像して', 'ちょっとした思いつき'];   // [秒] 来た・帰った・近いの反応どうしの間隔
 
 const NOTICE_CHANCE = 0.25;  // 暇つぶし1回あたり、物音に振り向く確率
 const IDLE_MOTIONS_ONLY = ['nodSlow', 'lookAround', 'tiltR', 'stretch', 'happyBounce',
@@ -222,27 +228,33 @@ class RitsuBrain {
     if (this.queue.length) this.chat(this.queue.shift());
   }
 
-  async _complete(userText) {
-    const system = `${SYSTEM_PROMPT}\n\n# 今の状況\n${this.ctx.describe()}`;
-    const messages = [{ role: 'system', content: system },
-                      ...this.history.slice(-6),
-                      { role: 'user', content: userText }];
-    let reply;
+  /** LiteLLM へ問い合わせて返答の本文を返す。失敗したら null */
+  async _request(messages, temperature) {
     try {
       const res = await fetch(`${RITSU_CFG.llmUrl}/v1/chat/completions`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(RITSU_CFG.llmTimeoutSec * 1000),
-        body: JSON.stringify({ model: RITSU_CFG.llmModel, messages,
-                               temperature: 0.9, max_tokens: 96 }),
+        body: JSON.stringify({ model: RITSU_CFG.llmModel, messages, temperature, max_tokens: 96 }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-      reply = (await res.json()).choices[0].message.content.trim();
+      const reply = (await res.json()).choices[0].message.content.trim();
       this.onStatus(true);
+      return reply;
     } catch (e) {
       console.warn('[brain] LLM error:', e);
       this.onStatus(false);
-      return { ...validateReply(FALLBACK_REPLY), ok: false };
+      return null;
     }
+  }
+
+  _systemPrompt() { return `${SYSTEM_PROMPT}\n\n# 今の状況\n${this.ctx.describe()}`; }
+
+  async _complete(userText) {
+    const messages = [{ role: 'system', content: this._systemPrompt() },
+                      ...this.history.slice(-6),
+                      { role: 'user', content: userText }];
+    const reply = await this._request(messages, 0.9);
+    if (reply === null) return { ...validateReply(FALLBACK_REPLY), ok: false };
     const v = validateReply(reply);
     if (!v) {
       console.warn('[brain] invalid reply:', reply);
@@ -279,8 +291,11 @@ class RitsuBrain {
                        text: Math.random() < 0.5 ? NOTICE_LINES[Math.floor(Math.random() * NOTICE_LINES.length)] : null,
                        source: 'idle' });
           } else if (Math.random() < 0.5) {
-            const [motion, emotion, text] = this._pickIdleLine();
-            this.act({ text, motion, emotion, source: 'idle' });
+            if (Math.random() < RITSU_CFG.llmIdleChance) this._llmIdleLine();
+            else {
+              const [motion, emotion, text] = this._pickIdleLine();
+              this.act({ text, motion, emotion, source: 'idle' });
+            }
           } else {
             this.act({ motion: IDLE_MOTIONS_ONLY[Math.floor(Math.random() * IDLE_MOTIONS_ONLY.length)] });
           }
@@ -290,6 +305,40 @@ class RitsuBrain {
     };
     schedule();
     this._startPeek();
+  }
+
+  /** 今の状況(時間帯・季節・行事・曜日・目の前の人)を渡して、LLM に独り言を作らせる。
+   *  毎回話題を1つ指定して偏りを減らし、最近言ったことは避けさせる。
+   *  作っている間に話しかけられたら捨てる。失敗したら用意したセリフで代わりに言う */
+  async _llmIdleLine() {
+    if (this.idleGenerating) return;
+    this.idleGenerating = true;
+    const startedChat = this.lastChat;
+    const topic = IDLE_TOPICS[Math.floor(Math.random() * IDLE_TOPICS.length)];
+    const recent = this.recentLines.slice(-5).map(t => `- ${t}`).join('\n') || '- (なし)';
+    const prompt = `(今は誰にも話しかけられていません。看板娘として、ひとりごとをつぶやいてください)
+話題: ${topic}
+条件: 1文、40文字以内。いつもの丁寧で柔らかい口調。「今の状況」の日付と矛盾しない内容にする。
+motion はつぶやきの内容に合うものを選ぶ(thinking ばかりにしない)。
+最近言ったこと(同じ内容・言い回しは避ける):
+${recent}`;
+    const reply = await this._request([{ role: 'system', content: this._systemPrompt() },
+                                       { role: 'user', content: prompt }], 1.0);
+    this.idleGenerating = false;
+    const v = reply && validateReply(reply);
+    if (this.busy || this.lastChat !== startedChat) return;   // 作っている間に会話が始まった
+    if (!v || this.recentLines.includes(v.text)) {
+      if (reply) console.warn('[brain] invalid idle line:', reply);
+      const [motion, emotion, text] = this._pickIdleLine();
+      this.act({ text, motion, emotion, source: 'idle' });
+      return;
+    }
+    this.recentLines = [...this.recentLines, v.text].slice(-8);
+    // 小さいモデルは独り言だと thinking / neutral ばかり選ぶので、そのときは独り言向けの動きから選び直す
+    let { motion, emotion } = v;
+    if (motion === 'thinking' || motion === 'talkGesture1') motion = IDLE_LLM_MOTIONS[Math.floor(Math.random() * IDLE_LLM_MOTIONS.length)];
+    if (emotion === 'neutral' && Math.random() < 0.6) emotion = 'happy';
+    this.act({ text: v.text, motion, emotion, source: 'idle-llm' });
   }
 
   /** 半分は今の状況(時間帯・季節・曜日・人との距離)に合った独り言、半分はいつもの独り言。

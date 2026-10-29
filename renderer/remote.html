@@ -132,7 +132,7 @@
   });
   ros.sub('/ritsu/say', 'std_msgs/String', m => {
     const msg = parse(m.data);
-    if (typeof msg.text === 'string') add(msg.source === 'idle' ? 'ritsu idle' : 'ritsu', msg.text, '律');
+    if (typeof msg.text === 'string') add(String(msg.source).startsWith('idle') ? 'ritsu idle' : 'ritsu', msg.text, '律');
   });
   ros.sub('/ritsu/thinking', 'std_msgs/Bool', m => {
     thinking.classList.toggle('show', !!m.data);

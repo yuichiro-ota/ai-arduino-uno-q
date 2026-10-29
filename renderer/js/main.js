@@ -8,7 +8,7 @@
  *   購読 /ritsu/person_present std_msgs/Bool
  *   購読 /ritsu/camera_alive   std_msgs/Bool    人検出の生存通知(2秒ごと。CAMERAランプ)
  *   購読 /ritsu/tilt           geometry_msgs/Vector3  カメラの傾き[度] x=roll。左右に大きく傾くと「おっとっと」
- *   発行 /ritsu/say            std_msgs/String  JSON {"text":"...","emotion":"happy","motion":"wave","source":"llm|fallback|idle"}
+ *   発行 /ritsu/say            std_msgs/String  JSON {"text":"...","emotion":"happy","motion":"wave","source":"llm|fallback|idle|idle-llm"}
  *   発行 /ritsu/thinking       std_msgs/Bool    返事を考え中
  * =========================================================================
  * ========================================================================= */

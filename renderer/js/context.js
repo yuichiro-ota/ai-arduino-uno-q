@@ -177,7 +177,10 @@ class RitsuContext {
       `${d.getHours()}時${String(d.getMinutes()).padStart(2, '0')}分 / ${TOD[this.timeOfDay(d)]}`,
       `季節: ${SEASON[this.season(d)]} / ${dayText}`,
     ];
-    const ev = this.events(d);
+    // 行事は期間の終わりの日付も付ける(前日なのに「今日はハロウィン」と言わないように)
+    const md = (d.getMonth() + 1) * 100 + d.getDate();
+    const ev = SEASON_EVENTS.filter(([m1, d1, m2, d2]) => md >= m1 * 100 + d1 && md <= m2 * 100 + d2)
+                            .map(([, , m2, d2, name]) => md === m2 * 100 + d2 ? `${name}(今日まで)` : `${name}(${m2}月${d2}日まで)`);
     if (ev.length) lines.push(`季節の話題: ${ev.join('、')}`);
     if (this.personPresent) {
       const DIST = { near: 'すぐ目の前(とても近い)', mid: '話しやすい距離', far: '少し離れたところ' };

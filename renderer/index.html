@@ -16,20 +16,27 @@
   html, body { width: 100%; height: 100%; overflow: hidden; background: var(--cream); font-family: "Hiragino Maru Gothic ProN", "BIZ UDGothic", "Noto Sans JP", sans-serif; }
   #stage { position: fixed; inset: 0; }
 
-  /* ---- 字幕(律の発話) ---- */
+  /* ---- 吹き出し(律の発話) ----
+     縦置きの小さめモニター(高さ約400mm)で読みやすいよう、画面上部に大きな文字で出す。
+     文字の大きさは画面幅に合わせる(縦置き1080px幅で54px) */
   #subtitle {
-    position: fixed; left: 50%; bottom: 130px; transform: translateX(-50%);
-    max-width: 86%; padding: 14px 22px; border-radius: 24px;
-    background: rgba(255,255,255,0.92); color: var(--ink);
-    font-size: 22px; line-height: 1.5; text-align: center;
-    box-shadow: 0 6px 24px rgba(255,111,145,0.25);
-    opacity: 0; transition: opacity .3s; z-index: 10; pointer-events: none;
+    position: fixed; left: 50%; top: max(70px, 5vh); transform: translate(-50%, -12px) scale(0.96);
+    width: max-content; max-width: 84%; padding: 0.55em 0.9em; border-radius: 0.9em;
+    background: rgba(255,255,255,0.96); color: var(--ink);
+    border: max(3px, 0.4vw) solid var(--sakura);
+    font-size: clamp(24px, 5vw, 64px); font-weight: 700; line-height: 1.4;
+    text-align: left; word-break: normal; overflow-wrap: anywhere; line-break: strict;
+    box-shadow: 0 0.25em 1em rgba(255,111,145,0.3);
+    opacity: 0; transition: opacity .25s, transform .25s; z-index: 10; pointer-events: none;
   }
-  #subtitle.show { opacity: 1; }
-  #subtitle::after {
-    content: ""; position: absolute; top: -14px; left: 50%; transform: translateX(-50%);
-    border: 8px solid transparent; border-bottom-color: rgba(255,255,255,0.92);
+  #subtitle.show { opacity: 1; transform: translate(-50%, 0) scale(1); }
+  /* しっぽ(下の律へ向ける) */
+  #subtitle::before, #subtitle::after {
+    content: ""; position: absolute; left: 50%; transform: translateX(-50%);
+    border-style: solid; border-color: transparent;
   }
+  #subtitle::before { top: 100%; border-width: 0.55em 0.45em 0; border-top-color: var(--sakura); }
+  #subtitle::after  { top: calc(100% - max(3px, 0.4vw) * 1.6); border-width: 0.45em 0.36em 0; border-top-color: rgba(255,255,255,0.96); }
 
   /* ---- チャット入力 ---- */
   #chatbar {

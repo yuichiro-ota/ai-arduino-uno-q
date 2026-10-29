@@ -12,12 +12,14 @@ iPhone ─/remote─▶ nginx:8080 ─ /llm/* (+APIキー) ───────
 ```
 
 - 48種類のモーション、8種類の表情、自動まばたき、呼吸、髪の揺れ（スプリングボーン）
-- チャット入力 → LLM の返答を字幕で表示し、返答の `[emotion:x][motion:y]` タグで表情とモーションを付ける。口パクあり（音声なし）
+- チャット入力 → LLM の返答を画面上部の吹き出し（縦置きモニターで読みやすい大きな文字）で表示し、返答の `[emotion:x][motion:y]` タグで表情とモーションを付ける。口パクあり（音声なし）
 - **iPhone などから話しかけられる**: `http://192.168.3.80:8080/remote` を開くと、入力ページから画面の律に話しかけ、返事を受け取れる（複数台で同時に使える）
 - 深度カメラで人の顔の位置を測り（`/ritsu/person`）、律の目線がその人を追う
 - カメラ（IMU）が左右に15度以上傾くと、傾いた側へ「おっとっと」とよろける
 - 会話が無いと1〜2分に1回カメラが目元まで寄ってのぞき込む、話しかけると胸から上へ寄る、物音に振り向く
 - 一定間隔で独り言やダンスをする暇つぶし行動
+- **今の状況に合わせた会話**（`renderer/js/context.js`）: 日時・時間帯・季節・平日/土日/祝日（振替休日を含む）・季節の行事・カメラ前の人の距離を LLM に渡し、独り言も状況に合わせて選ぶ。人が来たら時間帯に合った挨拶、帰ったらお見送り、とても近いと照れる
+- **返答の検証**: LLM の返答から知らない表情・モーション名、崩れたタグ、記号、絵文字、名前の前置きを取り除き、長すぎる返答は文の区切りで切る。日本語でない返答は使わない
 - `renderer/models/avatar.vrm` を差し替えるだけで別の VRM（0.x / 1.0）に変えられる。ファイルが無い場合は内蔵モデルで起動する
 
 ## ファイル構成
@@ -33,8 +35,9 @@ iPhone ─/remote─▶ nginx:8080 ─ /llm/* (+APIキー) ───────
 | `renderer/index.html` | 画面（three.js / three-vrm / roslib.js は jsdelivr CDN から読み込み） |
 | `renderer/remote.html` | iPhone などから話しかける入力ページ |
 | `renderer/js/ros.js` | rosbridge への接続（自動再接続・購読のやり直し） |
-| `renderer/js/brain.js` | LLM 呼び出し、タグ解析、暇つぶし行動 |
-| `renderer/js/main.js` | シーン、カメラワーク、字幕、口パク、チャット UI、ROS 2 連携 |
+| `renderer/js/context.js` | 今の状況（日時・季節・祝日・カメラ前の人） |
+| `renderer/js/brain.js` | LLM 呼び出し、返答の検証、状況に合わせた独り言・挨拶 |
+| `renderer/js/main.js` | シーン、カメラワーク、吹き出し、口パク、チャット UI、ROS 2 連携 |
 | `renderer/js/vrm_avatar.js` / `character.js` / `motions.js` | VRM 制御、内蔵モデル、モーション定義 |
 | `kiosk/ritsu-kiosk.sh` | キオスク表示の起動スクリプト |
 
@@ -146,4 +149,6 @@ docker logs -f ritsu-camera               # 検出状況が5秒ごとに出る
 RITSU.play('wave')          // モーション再生
 RITSU.list()                // モーション一覧
 RITSU.brain.chat('こんにちは') // 会話テスト
+RITSU.ctx.describe()        // LLM に渡している「今の状況」
+RITSU.person(1.2)           // カメラ無しで人が来たことにする(距離[m])。8秒呼ばないと帰った扱い
 ```

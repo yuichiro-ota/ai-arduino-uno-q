@@ -26,14 +26,21 @@ const RITSU_CFG = (() => {
   return cfg;
 })();
 
+const EMOTIONS = ['happy', 'excited', 'shy', 'surprised', 'sad', 'angry', 'sleepy', 'neutral'];
+const TALK_MOTIONS = ['wave', 'bigWave', 'bow', 'nod', 'shakeNo', 'happyBounce', 'jump', 'clap', 'peace',
+                      'thinking', 'heartPose', 'cheer', 'laugh', 'wink', 'tiltL', 'agree', 'talkGesture1',
+                      'kyun', 'nekoPose', 'twirl', 'idolWink', 'blowKiss', 'pikoJump', 'ojigiKawaii'];
+const REPLY_MAX_CHARS = 70;   // 字幕に収まる長さ(システムプロンプトでは60文字以内と指示)
+
 const SYSTEM_PROMPT = `あなたは「律(りつ)」。落ち着いた雰囲気だけど心優しい、可愛いバーチャル看板娘です。
 - 一人称は「わたし」。丁寧で柔らかい口調。「〜ですよ」「〜ですね」を使い、時々「ふふっ」と笑う。
-- 返答は必ず2文以内、60文字以内。長い説明はしない。
+- 返答は必ず日本語で、2文以内、60文字以内。長い説明はしない。絵文字・記号・箇条書きは使わない。
 - 返答の先頭に必ず [emotion:名前][motion:名前] を1つずつ付ける。
-  emotion: happy, excited, shy, surprised, sad, angry, sleepy, neutral
-  motion: wave, bigWave, bow, nod, shakeNo, happyBounce, jump, clap, peace,
-          thinking, heartPose, cheer, laugh, wink, tiltL, agree, talkGesture1,
-          kyun, nekoPose, twirl, idolWink, blowKiss, pikoJump, ojigiKawaii
+  emotion: ${EMOTIONS.join(', ')}
+  motion: ${TALK_MOTIONS.join(', ')}
+- 下の「今の状況」は本当の情報。日付・曜日・時間・季節を聞かれたらこれを使い、推測で答えない。
+- 状況(時間帯・季節・行事・相手との距離)は会話が自然になるときだけ軽く触れる。毎回は触れない。
+  例: 夜なら「こんばんは」、朝なら「おはようございます」。相手がとても近いときは少し照れる。
 例: [emotion:happy][motion:ojigiKawaii] こんにちは、律です。お会いできて嬉しいです。`;
 
 const IDLE_LINES = [
@@ -63,6 +70,79 @@ const NOTICE_LINES = [
   '……?誰か、いらっしゃいました?',
   '今の音……なんでしょう?',
 ];
+
+/* ---- 状況に合わせた独り言 [motion, emotion, text] (context.js の RitsuContext を参照) ---- */
+const TOD_LINES = {
+  earlyMorning: [['stretch', 'sleepy', 'ふぁ……朝早いですね。わたしも、まだ少し眠たいです。']],
+  morning:      [['cheer', 'happy', '朝の空気って、気持ちいいですね。'],
+                 ['stretch', 'happy', 'んーっ……今日も一日、始まりますね。']],
+  noon:         [['thinking', 'neutral', 'そろそろお昼ごはんの時間ですね。何にしようかな……']],
+  afternoon:    [['tiltL', 'neutral', '午後は、なんだかのんびりした気分になりますね。'],
+                 ['sleepyNod', 'sleepy', 'お昼のあとって、眠くなりますよね……ふぁ。']],
+  evening:      [['lookAround', 'neutral', 'もう夕方ですね。一日があっという間です。']],
+  night:        [['thinking', 'neutral', '夜は静かで、落ち着きますね。'],
+                 ['wink', 'happy', '今日も一日、お疲れさまでした。']],
+  lateNight:    [['sleepyNod', 'sleepy', 'こんな夜更けまで……あまり無理しないでくださいね。'],
+                 ['sleepyNod', 'sleepy', 'ふぁ……そろそろ、おやすみの時間でしょうか……']],
+};
+const SEASON_LINES = {
+  spring: [['happyBounce', 'happy', '春は、なんだかわくわくしますね。']],
+  summer: [['nod', 'neutral', '暑い日が続きますね。水分補給、忘れずにですよ。']],
+  autumn: [['happyBounce', 'happy', '秋は、食べ物がおいしい季節ですね。ふふっ。'],
+           ['lookAround', 'neutral', '少し涼しくなってきましたね。']],
+  winter: [['shy', 'shy', '寒いですね……あったかくしてくださいね。']],
+};
+const EVENT_LINES = {
+  'お正月':           ['ojigiKawaii', 'happy', 'あけましておめでとうございます。今年もよろしくお願いしますね。'],
+  '節分':             ['laugh', 'happy', '鬼は外、福は内……ふふっ、豆まきの季節ですね。'],
+  'バレンタイン':     ['kyun', 'shy', 'もうすぐバレンタインですね。チョコ、好きですか?'],
+  'ひな祭り':         ['happyBounce', 'happy', 'ひな祭りですね。ひなあられ、食べたいなぁ。'],
+  'お花見の季節':     ['twirl', 'excited', '桜の季節ですね。お花見、行きましたか?'],
+  'ゴールデンウィーク': ['happyBounce', 'excited', 'ゴールデンウィークですね。どこかへお出かけしますか?'],
+  '梅雨':             ['tiltL', 'neutral', '雨の日が多いですね。傘、忘れないでくださいね。'],
+  '七夕':             ['thinking', 'happy', '七夕ですね。お願いごと、決まりましたか?'],
+  'お盆':             ['nodSlow', 'neutral', 'お盆休み、ゆっくりできていますか?'],
+  'お月見':           ['lookAround', 'happy', 'お月見の季節ですね。お団子、食べたいなぁ。'],
+  'ハロウィン':       ['twirl', 'excited', 'もうすぐハロウィンですね。仮装、何がいいかな?'],
+  'クリスマス':       ['happyBounce', 'excited', 'もうすぐクリスマスですね。わくわくします。'],
+  '年末':             ['nodSlow', 'neutral', '今年もあと少しですね。一年、早かったなぁ。'],
+};
+const DISTANCE_LINES = {
+  mid: [['wave', 'happy', 'よかったら、話しかけてくださいね。'],
+        ['tiltL', 'neutral', '何か、お探しですか?']],
+  far: [['comeHere', 'happy', 'そこの方、よかったら近くへどうぞ。'],
+        ['wave', 'happy', 'ふふっ、遠くからでも見えていますよ。']],
+};
+
+/** 今の状況で言ってよい独り言の候補 */
+function situationalLines(ctx) {
+  const d = new Date();
+  const out = [...TOD_LINES[ctx.timeOfDay(d)], ...SEASON_LINES[ctx.season(d)]];
+  for (const ev of ctx.events(d)) if (EVENT_LINES[ev]) out.push(EVENT_LINES[ev]);
+  if (d.getMonth() === 9 && d.getDate() === 31) out.push(['twirl', 'excited', 'ハッピーハロウィン!トリック・オア・トリート、ですよ。']);
+  const type = ctx.dayType(d), w = d.getDay();
+  if (type === 'holiday') out.push(['happyBounce', 'happy', `今日は${RitsuHoliday.name(d)}ですね。のんびりできていますか?`]);
+  else if (type === 'weekend') out.push(['happyBounce', 'happy', '今日はお休みですね。ゆっくりしていってください。']);
+  else if (w === 1) out.push(['cheer', 'happy', '月曜日ですね。今週も、一緒に頑張りましょう。']);
+  else if (w === 5) out.push(['happyBounce', 'happy', '今日は金曜日。あと少しで週末ですよ、ふふっ。']);
+  else out.push(['ojigiKawaii', 'happy', 'お仕事や学校、お疲れさまです。']);
+  const dist = ctx.personDistance;
+  if (DISTANCE_LINES[dist]) out.push(...DISTANCE_LINES[dist]);
+  if (ctx.personPresent && performance.now() - ctx.personSince > 180000)
+    out.push(['nodSlow', 'happy', 'ゆっくりしていってくださいね。']);
+  return out;
+}
+
+/** 人が来た・帰った・近づいたときのひとこと */
+function greetingFor(ctx) {
+  return { earlyMorning: 'おはようございます。朝早いですね。', morning: 'おはようございます。',
+           noon: 'こんにちは。', afternoon: 'こんにちは。', evening: 'こんにちは。もう夕方ですね。',
+           night: 'こんばんは。', lateNight: 'こんばんは。夜遅くまでお疲れさまです。' }[ctx.timeOfDay()];
+}
+const NEAR_LINES = ['わっ……ち、近いです……!', 'ふふっ、そんなに近くで見られると照れちゃいます。',
+                    'あの……ちょっとだけ、近いかも……'];
+const REACT_COOLDOWN = 45;   // [秒] 来た・帰った・近いの反応どうしの間隔
+
 const NOTICE_CHANCE = 0.25;  // 暇つぶし1回あたり、物音に振り向く確率
 const IDLE_MOTIONS_ONLY = ['nodSlow', 'lookAround', 'tiltR', 'stretch', 'happyBounce',
                            'danceC', 'sleepyNod', 'rhythmSway', 'pikoJump', 'mojimoji',
@@ -72,11 +152,40 @@ const TAG_RE = /\[(emotion|motion):([a-zA-Z0-9_]+)\]/g;
 const QUEUE_MAX = 5;   // 返事中に届いた話しかけを順番待ちさせる上限
 const FALLBACK_REPLY = '[emotion:shy][motion:tiltL] ごめんなさい、少し考えごとをしていました。もう一度お願いできますか?';
 
+/** LLM の返答を検証して整える。使えない返答なら null
+ *  - [emotion:x][motion:y] を取り出し、知らない名前は既定値へ
+ *  - 残ったタグ・記号・絵文字・「律:」などの前置きを除く
+ *  - 長すぎる返答は文の区切りで REPLY_MAX_CHARS 文字までに切る
+ *  - 日本語(ひらがな・カタカナ・漢字)を含まない返答は使わない */
+function validateReply(reply) {
+  let emotion = 'happy', motion = 'talkGesture1';
+  for (const [, kind, name] of reply.matchAll(TAG_RE)) {
+    if (kind === 'emotion' && EMOTIONS.includes(name)) emotion = name;
+    if (kind === 'motion' && typeof MOTIONS !== 'undefined' && MOTIONS[name]) motion = name;
+  }
+  let text = reply.replace(TAG_RE, '')
+    .replace(/\[[^\]]*\]/g, '')                               // 崩れたタグ
+    .replace(/[*#`_>~|]/g, '')                                  // マークダウン記号
+    .replace(/\p{Extended_Pictographic}|\uFE0F/gu, '')           // 絵文字
+    .replace(/^\s*(律|りつ|Ritsu|assistant)\s*[:：]\s*/i, '')     // 名前の前置き
+    .replace(/\s+/g, ' ').trim()
+    .replace(/^「(.*)」$/, '$1');
+  if (!/[\u3040-\u30ff\u4e00-\u9fff]/.test(text)) return null;
+  if (text.length > REPLY_MAX_CHARS) {   // 文の区切りで入るところまで残す
+    const sentences = text.match(/[^。!?！？]+[。!?！？…」]*/g) || [text];
+    let cut = '';
+    for (const st of sentences) { if ((cut + st).length > REPLY_MAX_CHARS) break; cut += st; }
+    text = cut.trim() || text.slice(0, REPLY_MAX_CHARS - 1) + '…';
+  }
+  return { text, emotion, motion };
+}
+
 class RitsuBrain {
   /** act({text, motion, emotion, source}) でキャラに反映。onStatus(ok) でLLMランプ更新、
-   *  onThinking(on) で返事を考え中かどうかを通知 */
-  constructor({ act, onStatus, onThinking }) {
+   *  onThinking(on) で返事を考え中かどうかを通知。ctx は RitsuContext(今の状況) */
+  constructor({ act, onStatus, onThinking, ctx }) {
     this.act = act;
+    this.ctx = ctx || new RitsuContext();
     this.onStatus = onStatus || (() => {});
     this.onThinking = onThinking || (() => {});
     this.history = [];
@@ -85,6 +194,11 @@ class RitsuBrain {
     this.lastInteraction = performance.now();
     this.lastPeek = performance.now();
     this.lastChat = -Infinity;   // 最後に話しかけられた時刻(会話中のカメラ寄り用)
+    this.lastReact = -Infinity;  // 来た・帰った・近いに反応した時刻
+    this.recentLines = [];       // 最近言った独り言(続けて同じことを言わないように)
+    this.ctx.on('arrive', absentSec => this._onArrive(absentSec));
+    this.ctx.on('leave', stayedSec => this._onLeave(stayedSec));
+    this.ctx.on('near', () => this._onNear());
   }
 
   async chat(userText) {
@@ -100,12 +214,7 @@ class RitsuBrain {
     this.lastInteraction = performance.now();
     this.act({ motion: 'listening' });
 
-    const { reply, ok } = await this._complete(userText);
-    let emotion = 'happy', motion = 'talkGesture1';
-    for (const [, kind, name] of reply.matchAll(TAG_RE)) {
-      if (kind === 'emotion') emotion = name; else motion = name;
-    }
-    const text = reply.replace(TAG_RE, '').trim() || 'ふふっ。';
+    const { text, motion, emotion, ok } = await this._complete(userText);
     this.act({ text, motion, emotion, source: ok ? 'llm' : 'fallback' });
     this.lastInteraction = this.lastChat = performance.now();
     this.busy = false;
@@ -114,7 +223,8 @@ class RitsuBrain {
   }
 
   async _complete(userText) {
-    const messages = [{ role: 'system', content: SYSTEM_PROMPT },
+    const system = `${SYSTEM_PROMPT}\n\n# 今の状況\n${this.ctx.describe()}`;
+    const messages = [{ role: 'system', content: system },
                       ...this.history.slice(-6),
                       { role: 'user', content: userText }];
     let reply;
@@ -131,12 +241,18 @@ class RitsuBrain {
     } catch (e) {
       console.warn('[brain] LLM error:', e);
       this.onStatus(false);
-      return { reply: FALLBACK_REPLY, ok: false };
+      return { ...validateReply(FALLBACK_REPLY), ok: false };
     }
+    const v = validateReply(reply);
+    if (!v) {
+      console.warn('[brain] invalid reply:', reply);
+      return { ...validateReply(FALLBACK_REPLY), ok: false };
+    }
+    // 履歴には整えた形で残す(崩れた返答を次の返答が真似しないように)
     this.history.push({ role: 'user', content: userText },
-                      { role: 'assistant', content: reply });
+                      { role: 'assistant', content: `[emotion:${v.emotion}][motion:${v.motion}] ${v.text}` });
     this.history = this.history.slice(-12);
-    return { reply, ok: true };
+    return { ...v, ok: true };
   }
 
   /** 接続確認 (/v1/models) してランプに反映 */
@@ -163,7 +279,7 @@ class RitsuBrain {
                        text: Math.random() < 0.5 ? NOTICE_LINES[Math.floor(Math.random() * NOTICE_LINES.length)] : null,
                        source: 'idle' });
           } else if (Math.random() < 0.5) {
-            const [motion, emotion, text] = IDLE_LINES[Math.floor(Math.random() * IDLE_LINES.length)];
+            const [motion, emotion, text] = this._pickIdleLine();
             this.act({ text, motion, emotion, source: 'idle' });
           } else {
             this.act({ motion: IDLE_MOTIONS_ONLY[Math.floor(Math.random() * IDLE_MOTIONS_ONLY.length)] });
@@ -174,6 +290,52 @@ class RitsuBrain {
     };
     schedule();
     this._startPeek();
+  }
+
+  /** 半分は今の状況(時間帯・季節・曜日・人との距離)に合った独り言、半分はいつもの独り言。
+   *  最近言ったものは避ける */
+  _pickIdleLine() {
+    const situ = situationalLines(this.ctx).filter(l => !this.recentLines.includes(l[2]));
+    const base = IDLE_LINES.filter(l => !this.recentLines.includes(l[2]));
+    const pool = situ.length && (Math.random() < 0.5 || !base.length) ? situ : base;
+    const line = pool[Math.floor(Math.random() * pool.length)];
+    this.recentLines = [...this.recentLines, line[2]].slice(-8);
+    return line;
+  }
+
+  /** 来た・帰った・近いへの反応をしてよいか(会話中・直前の反応のすぐ後は控える) */
+  _canReact() {
+    const now = performance.now();
+    if (this.busy || (now - this.lastChat) / 1000 < 15 || (now - this.lastReact) / 1000 < REACT_COOLDOWN) return false;
+    this.lastReact = this.lastInteraction = now;
+    return true;
+  }
+
+  _onArrive(absentSec) {
+    if (absentSec < 60) {   // ちょっと離れて戻ってきた
+      if (absentSec > 15 && Math.random() < 0.5 && this._canReact())
+        this.act({ text: 'おかえりなさい。', motion: 'wave', emotion: 'happy', source: 'idle' });
+      return;
+    }
+    if (!this._canReact()) return;
+    const far = this.ctx.personDistance === 'far';
+    this.act({ text: greetingFor(this.ctx) + (far ? 'よかったら、近くへどうぞ。' : ''),
+               motion: far ? 'comeHere' : Math.random() < 0.5 ? 'wave' : 'ojigiKawaii',
+               emotion: 'happy', source: 'idle' });
+  }
+
+  _onLeave(stayedSec) {
+    if (stayedSec < 15 || !this._canReact()) return;
+    const night = ['night', 'lateNight'].includes(this.ctx.timeOfDay());
+    const text = night ? 'おやすみなさい。またお越しくださいね。'
+               : ['またお越しくださいね。', 'ありがとうございました。また来てくださいね。'][Math.floor(Math.random() * 2)];
+    this.act({ text, motion: 'byebye', emotion: 'happy', source: 'idle' });
+  }
+
+  _onNear() {
+    if (!this._canReact()) return;
+    this.act({ text: NEAR_LINES[Math.floor(Math.random() * NEAR_LINES.length)],
+               motion: 'mojimoji', emotion: 'shy', source: 'idle' });
   }
 
   /** 会話が無い間、peekMinSec〜peekMaxSec 秒に1回のぞき込む(話しかけられたら数え直し) */

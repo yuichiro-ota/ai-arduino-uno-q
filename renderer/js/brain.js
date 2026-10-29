@@ -7,7 +7,7 @@
 const RITSU_CFG = (() => {
   const cfg = Object.assign({
     llmUrl: '/llm', llmModel: 'chat',
-    llmTimeoutSec: 30, llmIdleChance: 0.5, idleMinSec: 25, idleMaxSec: 60, peekMinSec: 60, peekMaxSec: 120,
+    llmTimeoutSec: 30, llmIdleChance: 0.67, idleSpeakChance: 0.75, idleMinSec: 10, idleMaxSec: 20, peekMinSec: 60, peekMaxSec: 120,
     pixelRatio: 1.5, antialias: true, petals: 40, simpleMaterials: false,
   }, window.RITSU_CONFIG || {});
   const q = new URLSearchParams(location.search);
@@ -149,7 +149,7 @@ const IDLE_TOPICS = ['今の時間帯のこと', '今の季節のこと', '季�
                      '目の前の人(いれば)へのさりげない声かけ', '看板娘のお仕事のこと',
                      '好きな食べ物や飲み物のこと', '天気や空気の感じを想像して', 'ちょっとした思いつき'];   // [秒] 来た・帰った・近いの反応どうしの間隔
 
-const NOTICE_CHANCE = 0.25;  // 暇つぶし1回あたり、物音に振り向く確率
+const NOTICE_CHANCE = 0.3;   // LLM を使わないとき・しゃべらないときに、物音に振り向く確率
 const IDLE_MOTIONS_ONLY = ['nodSlow', 'lookAround', 'tiltR', 'stretch', 'happyBounce',
                            'danceC', 'sleepyNod', 'rhythmSway', 'pikoJump', 'mojimoji',
                            'guruguru', 'twirl'];
@@ -174,6 +174,7 @@ function validateReply(reply) {
     .replace(/[*#`_>~|]/g, '')                                  // マークダウン記号
     .replace(/\p{Extended_Pictographic}|\uFE0F/gu, '')           // 絵文字
     .replace(/^\s*(律|りつ|Ritsu|assistant)\s*[:：]\s*/i, '')     // 名前の前置き
+    .replace(/[呢吗]/g, '')                                      // 小さいモデルが混ぜる中国語の語気助詞
     .replace(/\s+/g, ' ').trim()
     .replace(/^「(.*)」$/, '$1');
   if (!/[\u3040-\u30ff\u4e00-\u9fff]/.test(text)) return null;
@@ -285,18 +286,18 @@ class RitsuBrain {
         const quietSec = (performance.now() - this.lastInteraction) / 1000;
         const sincePeek = (performance.now() - this.lastPeek) / 1000;
         if (!this.busy && quietSec > RITSU_CFG.idleMinSec && sincePeek > 8) {   // のぞき込み直後は控える
-          if (Math.random() < NOTICE_CHANCE) {
-            // 半分は無言で振り向くだけ(毎回しゃべると不自然なため)
-            this.act({ motion: Math.random() < 0.5 ? 'noticeL' : 'noticeR', emotion: 'surprised',
-                       text: Math.random() < 0.5 ? NOTICE_LINES[Math.floor(Math.random() * NOTICE_LINES.length)] : null,
-                       source: 'idle' });
-          } else if (Math.random() < 0.5) {
+          const notice = text => this.act({ motion: Math.random() < 0.5 ? 'noticeL' : 'noticeR',
+                                            emotion: 'surprised', text, source: 'idle' });
+          if (Math.random() < RITSU_CFG.idleSpeakChance) {          // しゃべる
             if (Math.random() < RITSU_CFG.llmIdleChance) this._llmIdleLine();
+            else if (Math.random() < NOTICE_CHANCE) notice(NOTICE_LINES[Math.floor(Math.random() * NOTICE_LINES.length)]);
             else {
               const [motion, emotion, text] = this._pickIdleLine();
               this.act({ text, motion, emotion, source: 'idle' });
             }
-          } else {
+          } else if (Math.random() < NOTICE_CHANCE) {               // 無言で振り向く
+            notice(null);
+          } else {                                                   // モーションだけ
             this.act({ motion: IDLE_MOTIONS_ONLY[Math.floor(Math.random() * IDLE_MOTIONS_ONLY.length)] });
           }
         }

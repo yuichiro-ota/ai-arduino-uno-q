@@ -39,10 +39,10 @@
     scene.background = new THREE.CanvasTexture(c);
   }
 
-  // 縦長(9:16想定)で全身が入るカメラ。上の吹き出しと頭が重ならないよう、少し引いて律を画面の下寄りに置く
+  // 縦長(9:16想定)で全身が入るカメラ
   const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 50);
-  camera.position.set(0, 1.3, 3.5);
-  camera.lookAt(0, 1.12, 0);
+  camera.position.set(0, 1.25, 3.1);
+  camera.lookAt(0, 1.05, 0);
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.85));
   const key = new THREE.DirectionalLight(0xfff0e8, 1.1);
@@ -124,7 +124,7 @@
   /* ===== カメラワーク =====
    *  全身(既定) → 会話中は胸から上へ寄る → その上に「振り向き」の振れと「のぞき込み」の寄りを重ねる */
   const camHome = camera.position.clone();
-  const lookHome = new THREE.Vector3(0, 1.12, 0);
+  const lookHome = new THREE.Vector3(0, 1.05, 0);
   const TALK_HOLD = 20;       // 最後の会話からこの秒数は寄ったまま
   const PEEK_IN = 0.9, PEEK_HOLD = 2.6, PEEK_OUT = 1.1;
   const PAN_DUR = 3.8;        // motions.js の noticeL/R と同じ長さ
@@ -149,8 +149,8 @@
     // ① 会話中は胸から上へ寄る
     const talking = brain.busy || (now - brain.lastChat) / 1000 < TALK_HOLD;
     talkK += ((talking ? 1 : 0) - talkK) * Math.min(1, dt * 1.2);
-    v.talkPos.set(headRest.x, headRest.y, headRest.z + 1.3);
-    v.talkLook.set(headRest.x, headRest.y - 0.06, headRest.z);   // 頭を画面のやや下へ(上の吹き出しと重ならないように)
+    v.talkPos.set(headRest.x, headRest.y - 0.1, headRest.z + 1.3);
+    v.talkLook.set(headRest.x, headRest.y - 0.2, headRest.z);    // 頭を画面のやや上へ(下の吹き出しと重ならないように)
     v.basePos.lerpVectors(camHome, v.talkPos, talkK);
     v.baseLook.lerpVectors(lookHome, v.talkLook, talkK);
 

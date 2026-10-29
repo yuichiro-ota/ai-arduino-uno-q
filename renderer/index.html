@@ -17,10 +17,10 @@
   #stage { position: fixed; inset: 0; }
 
   /* ---- 吹き出し(律の発話) ----
-     縦置きの小さめモニター(高さ約400mm)で読みやすいよう、画面上部に大きな文字で出す。
+     縦置きの小さめモニター(高さ約400mm)で読みやすいよう大きな文字で出す。顔を隠さないよう画面の下側(入力欄の上)に置く。
      文字の大きさは画面幅に合わせる(縦置き1080px幅で54px) */
   #subtitle {
-    position: fixed; left: 50%; top: max(70px, 5vh); transform: translate(-50%, -12px) scale(0.96);
+    position: fixed; left: 50%; bottom: max(110px, 6vh); transform: translate(-50%, 12px) scale(0.96);
     width: max-content; max-width: 84%; padding: 0.55em 0.9em; border-radius: 0.9em;
     background: rgba(255,255,255,0.96); color: var(--ink);
     border: max(3px, 0.4vw) solid var(--sakura);
@@ -30,13 +30,13 @@
     opacity: 0; transition: opacity .25s, transform .25s; z-index: 10; pointer-events: none;
   }
   #subtitle.show { opacity: 1; transform: translate(-50%, 0) scale(1); }
-  /* しっぽ(下の律へ向ける) */
+  /* しっぽ(上の律へ向ける) */
   #subtitle::before, #subtitle::after {
     content: ""; position: absolute; left: 50%; transform: translateX(-50%);
     border-style: solid; border-color: transparent;
   }
-  #subtitle::before { top: 100%; border-width: 0.55em 0.45em 0; border-top-color: var(--sakura); }
-  #subtitle::after  { top: calc(100% - max(3px, 0.4vw) * 1.6); border-width: 0.45em 0.36em 0; border-top-color: rgba(255,255,255,0.96); }
+  #subtitle::before { bottom: 100%; border-width: 0 0.45em 0.55em; border-bottom-color: var(--sakura); }
+  #subtitle::after  { bottom: calc(100% - max(3px, 0.4vw) * 1.6); border-width: 0 0.36em 0.45em; border-bottom-color: rgba(255,255,255,0.96); }
 
   /* ---- チャット入力 ---- */
   #chatbar {
@@ -58,7 +58,7 @@
 
   /* ---- ステータスランプ ---- */
   /* 左上に横並び。モニターから離れて見ても読めるよう画面幅に合わせた大きさ(縦置き1080px幅で約28px)。
-     吹き出し(top: 5vh〜)より上に収める */
+     */
   #status {
     position: fixed; top: 1.2vh; left: 2.5vw; display: flex; gap: 1.2em;
     font-size: clamp(13px, 2.6vw, 32px); font-weight: 700; color: var(--ink); z-index: 11;

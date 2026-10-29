@@ -18,6 +18,10 @@ window.RITSU_CONFIG = {
   // しゃべるときに、LLM に今の状況(時間帯・季節・行事・目の前の人)から独り言を作らせる確率(0〜1)。
   // 残りは用意したセリフ・物音への反応。0 にすると会話以外で LLM を呼ばない
   llmIdleChance: 0.67,
+  // 天気(Open-Meteo、APIキー不要)。設置場所の緯度・経度にする。null にすると天気を使わない
+  //   UNO Q からインターネット(api.open-meteo.com)へ20分ごとに問い合わせる
+  weather: { lat: 35.68, lon: 139.76, place: '東京', refreshMin: 20 },
+
   // 画面のこちら側をのぞき込む間隔[秒](会話が無い間。話しかけられたら数え直し)
   peekMinSec: 60,
   peekMaxSec: 120,

@@ -215,7 +215,7 @@
 
   /* ===== 会話 & 暇つぶし ===== */
   const lampLlm = document.getElementById('lamp-llm');
-  const ctx = new RitsuContext();   // 日時・季節・カメラ前の人など、会話に使う今の状況
+  const ctx = new RitsuContext({ weather: RITSU_CFG.weather });   // 日時・季節・天気・カメラ前の人など、会話に使う今の状況
   const brain = new RitsuBrain({
     ctx,
     act({ text, motion, emotion, source }) {

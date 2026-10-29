@@ -1,6 +1,7 @@
 /* =========================================================================
  * context.js — 会話を自然にするための「今の状況」
- *   日時・時間帯・季節・平日/土日/祝日・季節の行事と、カメラ前の人の有無・距離をまとめる。
+ *   日時・時間帯・季節・平日/土日/祝日・季節の行事・天気と、カメラ前の人の有無・距離をまとめる。
+ *   天気は Open-Meteo (APIキー不要) から定期的に取得する。取れないときは天気の話をしない。
  *   brain.js が LLM へのシステムプロンプトと独り言の選択に使う。
  * ========================================================================= */
 
@@ -80,8 +81,22 @@ const SEASON_EVENTS = [
 
 const DISTANCE = { NEAR: 0.7, FAR: 1.8 };   // [m] これより近い/遠い
 
+/* ---- 天気 (WMO 天気コード → 日本語・種類) ---- */
+function weatherName(code) {
+  const t = [[0, '快晴', 'clear'], [1, '晴れ', 'clear'], [2, '晴れ時々くもり', 'cloudy'], [3, 'くもり', 'cloudy'],
+             [48, '霧', 'fog'], [57, '霧雨', 'rain'], [61, '小雨', 'rain'], [63, '雨', 'rain'], [67, '強い雨', 'rain'],
+             [71, '小雪', 'snow'], [75, '雪', 'snow'], [77, '雪', 'snow'], [81, 'にわか雨', 'rain'],
+             [82, '激しいにわか雨', 'rain'], [86, 'にわか雪', 'snow'], [99, '雷雨', 'storm']];
+  const hit = t.find(([max]) => code <= max) || t[t.length - 1];
+  return { text: hit[1], kind: hit[2] };
+}
+const WEATHER_STALE_MIN = 120;   // これより古い天気は使わない
+
 class RitsuContext {
-  constructor() {
+  /** weather: { lat, lon, place, refreshMin } を渡すと天気を取得する(lat が無ければ取得しない) */
+  constructor({ weather } = {}) {
+    this.weather = null;            // { text, kind, temp, feels, max, min, rainProb, rainSoon, at }
+    if (weather && weather.lat != null) this._startWeather(weather);
     this.personZ = null;            // 最後に見えた顔までの距離 [m]
     this.personLastSeen = -Infinity;
     this.personSince = null;        // 今回見え始めた時刻(いなくなったら null)
@@ -121,6 +136,45 @@ class RitsuContext {
     const stayed = (this.personLastSeen - this.personSince) / 1000;
     this.personSince = null;
     this._emit('leave', stayed);
+  }
+
+  /* ---- 天気 ---- */
+  _startWeather({ lat, lon, place, refreshMin = 20 }) {
+    this.weatherPlace = place || '';
+    const url = 'https://api.open-meteo.com/v1/forecast?' + new URLSearchParams({
+      latitude: lat, longitude: lon, timezone: 'Asia/Tokyo', forecast_days: 1,
+      current: 'temperature_2m,apparent_temperature,weather_code',
+      daily: 'temperature_2m_max,temperature_2m_min,precipitation_probability_max',
+      hourly: 'precipitation_probability',
+    });
+    const load = async () => {
+      try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const j = await res.json();
+        const w = weatherName(j.current.weather_code);
+        // この先3時間の降水確率の最大
+        const i = j.hourly.time.indexOf(j.current.time.slice(0, 13) + ':00');
+        const next = i >= 0 ? j.hourly.precipitation_probability.slice(i + 1, i + 4) : [];
+        this.weather = {
+          ...w, temp: j.current.temperature_2m, feels: j.current.apparent_temperature,
+          max: j.daily.temperature_2m_max[0], min: j.daily.temperature_2m_min[0],
+          rainProb: j.daily.precipitation_probability_max[0],
+          rainSoon: !['rain', 'snow', 'storm'].includes(w.kind) && next.some(p => p >= 50),
+          at: Date.now(),
+        };
+      } catch (e) {
+        console.warn('[context] weather error:', e);
+      }
+    };
+    load();
+    setInterval(load, refreshMin * 60000);
+  }
+
+  /** 新しい天気だけ返す(取得できない・古いときは null) */
+  get currentWeather() {
+    const w = this.weather;
+    return w && Date.now() - w.at < WEATHER_STALE_MIN * 60000 ? w : null;
   }
 
   get personPresent() { return this.personSince !== null && performance.now() - this.personLastSeen < 2000; }
@@ -182,6 +236,13 @@ class RitsuContext {
     const ev = SEASON_EVENTS.filter(([m1, d1, m2, d2]) => md >= m1 * 100 + d1 && md <= m2 * 100 + d2)
                             .map(([, , m2, d2, name]) => md === m2 * 100 + d2 ? `${name}(今日まで)` : `${name}(${m2}月${d2}日まで)`);
     if (ev.length) lines.push(`季節の話題: ${ev.join('、')}`);
+    const w = this.currentWeather;
+    if (w) {
+      const r = n => Math.round(n);
+      lines.push(`天気${this.weatherPlace ? `(${this.weatherPlace})` : ''}: ${w.text} ${r(w.temp)}℃(体感${r(w.feels)}℃) / ` +
+                 `今日の最高${r(w.max)}℃・最低${r(w.min)}℃ / 降水確率${w.rainProb}%` +
+                 (w.rainSoon ? ' / この後3時間以内に雨が降りそう' : ''));
+    }
     if (this.personPresent) {
       const DIST = { near: 'すぐ目の前(とても近い)', mid: '話しやすい距離', far: '少し離れたところ' };
       const sec = Math.round((performance.now() - this.personSince) / 1000);

@@ -7,7 +7,7 @@
 const RITSU_CFG = (() => {
   const cfg = Object.assign({
     llmUrl: '/llm', llmModel: 'chat',
-    llmTimeoutSec: 30, llmIdleChance: 0.67, idleSpeakChance: 0.75, idleMinSec: 10, idleMaxSec: 20, peekMinSec: 60, peekMaxSec: 120,
+    weather: null, llmTimeoutSec: 30, llmIdleChance: 0.67, idleSpeakChance: 0.75, idleMinSec: 10, idleMaxSec: 20, peekMinSec: 60, peekMaxSec: 120,
     pixelRatio: 1.5, antialias: true, petals: 40, simpleMaterials: false,
   }, window.RITSU_CONFIG || {});
   const q = new URLSearchParams(location.search);
@@ -107,6 +107,23 @@ const EVENT_LINES = {
   'クリスマス':       ['happyBounce', 'excited', 'もうすぐクリスマスですね。わくわくします。'],
   '年末':             ['nodSlow', 'neutral', '今年もあと少しですね。一年、早かったなぁ。'],
 };
+/** 天気に合わせた独り言(天気が取れているときだけ) */
+function weatherLines(w) {
+  if (!w) return [];
+  const out = [];
+  const day = new Date().getHours() >= 6 && new Date().getHours() < 17;
+  if (w.kind === 'rain') out.push(['tiltL', 'neutral', '雨が降っていますね。足元に気をつけてくださいね。']);
+  if (w.kind === 'snow') out.push(['shy', 'shy', '雪が降っていますね。あったかくしてくださいね。']);
+  if (w.kind === 'storm') out.push(['shy', 'surprised', '雷……ちょっとだけ、こわいです。']);
+  if (w.kind === 'clear' && day) out.push(['happyBounce', 'happy', '今日はいいお天気ですね。お出かけ日和です。']);
+  if (w.kind === 'cloudy' && day) out.push(['lookAround', 'neutral', '今日は雲が多いみたいですね。']);
+  if (w.rainSoon) out.push(['thinking', 'neutral', 'この後、雨が降るみたいです。傘、持っていますか?']);
+  if (w.temp >= 30) out.push(['sleepyNod', 'sleepy', '今日は暑いですね……水分補給、忘れずにですよ。']);
+  if (w.temp <= 5) out.push(['shy', 'shy', '今日は冷えますね。風邪をひかないようにしてくださいね。']);
+  if (w.max - w.min >= 10) out.push(['nod', 'neutral', '今日は寒暖差が大きいみたいです。上着で調節してくださいね。']);
+  return out;
+}
+
 const DISTANCE_LINES = {
   mid: [['wave', 'happy', 'よかったら、話しかけてくださいね。'],
         ['tiltL', 'neutral', '何か、お探しですか?']],
@@ -119,6 +136,7 @@ function situationalLines(ctx) {
   const d = new Date();
   const out = [...TOD_LINES[ctx.timeOfDay(d)], ...SEASON_LINES[ctx.season(d)]];
   for (const ev of ctx.events(d)) if (EVENT_LINES[ev]) out.push(EVENT_LINES[ev]);
+  out.push(...weatherLines(ctx.currentWeather));
   if (d.getMonth() === 9 && d.getDate() === 31) out.push(['twirl', 'excited', 'ハッピーハロウィン!トリック・オア・トリート、ですよ。']);
   const type = ctx.dayType(d), w = d.getDay();
   if (type === 'holiday') out.push(['happyBounce', 'happy', `今日は${RitsuHoliday.name(d)}ですね。のんびりできていますか?`]);
@@ -147,7 +165,8 @@ const IDLE_LLM_MOTIONS = ['nodSlow', 'tiltL', 'tiltR', 'lookAround', 'rhythmSway
                           'wink', 'stretch', 'thinking', 'talkGesture2', 'mojimoji'];
 const IDLE_TOPICS = ['今の時間帯のこと', '今の季節のこと', '季節の行事や、今日が何曜日か',
                      '目の前の人(いれば)へのさりげない声かけ', '看板娘のお仕事のこと',
-                     '好きな食べ物や飲み物のこと', '天気や空気の感じを想像して', 'ちょっとした思いつき'];   // [秒] 来た・帰った・近いの反応どうしの間隔
+                     '好きな食べ物や飲み物のこと', '今の天気や気温のこと(状況に天気が無ければ空気の感じを想像して)',
+                     'ちょっとした思いつき'];   // [秒] 来た・帰った・近いの反応どうしの間隔
 
 const NOTICE_CHANCE = 0.3;   // LLM を使わないとき・しゃべらないときに、物音に振り向く確率
 const IDLE_MOTIONS_ONLY = ['nodSlow', 'lookAround', 'tiltR', 'stretch', 'happyBounce',

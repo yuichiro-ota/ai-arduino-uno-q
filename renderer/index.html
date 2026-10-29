@@ -57,14 +57,16 @@
   #chatbar button:active { transform: scale(0.96); }
 
   /* ---- ステータスランプ ---- */
+  /* 左上に横並び。モニターから離れて見ても読めるよう画面幅に合わせた大きさ(縦置き1080px幅で約28px)。
+     吹き出し(top: 5vh〜)より上に収める */
   #status {
-    position: fixed; top: 20px; right: 18px; display: flex; flex-direction: column; gap: 6px;
-    font-size: 11px; color: var(--ink); z-index: 10; opacity: 0.8;
+    position: fixed; top: 1.2vh; left: 2.5vw; display: flex; gap: 1.2em;
+    font-size: clamp(13px, 2.6vw, 32px); font-weight: 700; color: var(--ink); z-index: 11;
   }
-  #status .lamp { display: flex; align-items: center; gap: 6px; }
-  #status .dot  { width: 9px; height: 9px; border-radius: 50%; background: #ccc; }
-  #status .on   { background: #57d9a3; box-shadow: 0 0 6px #57d9a3; }
-  #status .idle { background: #f2c14e; box-shadow: 0 0 6px #f2c14e; }
+  #status .lamp { display: flex; align-items: center; gap: 0.35em; }
+  #status .dot  { width: 0.75em; height: 0.75em; border-radius: 50%; background: #ccc; border: 2px solid rgba(90,74,82,0.25); }
+  #status .on   { background: #57d9a3; box-shadow: 0 0 0.4em #57d9a3; border-color: transparent; }
+  #status .idle { background: #f2c14e; box-shadow: 0 0 0.4em #f2c14e; border-color: transparent; }
 </style>
 </head>
 <body>

@@ -129,6 +129,7 @@
   const lookHome = new THREE.Vector3(0, 1.05, 0);
   const TALK_HOLD = 20;       // 最後の会話からこの秒数は寄ったまま
   const PEEK_IN = 0.9, PEEK_HOLD = 2.6, PEEK_OUT = 1.1;
+  const PEEK_FACE_LIFT = 0.14;   // 寄ったとき顔を画面の上側へずらす量(距離に対する割合)
   const PAN_DUR = 3.8;        // motions.js の noticeL/R と同じ長さ
   const headRest = new THREE.Vector3(0, 1.45, 0);   // 立ち姿の頭の位置(会話の寄り先の基準)
   let headRestReady = false;
@@ -173,7 +174,9 @@
       pk = envelope(peekT, PEEK_IN, PEEK_HOLD, PEEK_OUT);
       if (pk < 0) { peekT = -1; pk = 0; resetEmotionAfterCamera(); }
     }
-    headPos(v.head).y += 0.03;
+    // 寄った画面でも顔が下の吹き出しに隠れないよう、カメラを平行に下げて顔を画面の上から約3割の位置に置く
+    // (画角38度: 下げる量 = 距離 × 0.14 で、顔の中心が画面中央から上へ半分の高さの約4割)
+    headPos(v.head).y += 0.03 - peekDist * PEEK_FACE_LIFT;
     v.head.x += peekSide;
     v.near.set(v.head.x, v.head.y, v.head.z + peekDist);
     camera.position.lerpVectors(v.basePos, v.near, pk);
@@ -226,7 +229,7 @@
     act({ text, motion, emotion, source }) {
       if (emotion) setEmotionFor(emotion, motion, text);
       if (motion) player.play(motion);
-      if (motion === 'peek') startPeek();
+      if (motion === 'peek') startPeek(0.62);
       if (motion === 'glassTouchL' || motion === 'glassTouchR') startPeek(1.15, motion === 'glassTouchR' ? 0.12 : -0.12);
       if (motion === 'noticeL' || motion === 'noticeR') startPan(motion === 'noticeR' ? 1 : -1);
       if (motion === 'seeOffL' || motion === 'seeOffR') startPan(motion === 'seeOffR' ? 1 : -1);

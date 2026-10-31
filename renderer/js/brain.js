@@ -668,7 +668,7 @@ motion は次から選ぶ: ${motions.join(', ')}
       fallback: [motion, 'happy', (greet && greetingFor(this.ctx)) || pick(APPROACH_LINES)] });
   }
 
-  /** こちらを見ていた人が遠くへ下がった: 画面の向こうをのぞき込み(カメラも寄る)、何を言うかは LLM が決める。
+  /** こちらを見ていた人が 50cm ほど下がった: 画面の向こうをのぞき込み(カメラも寄る)、何を言うかは LLM が決める。
    *  こちらを見ないまま去っていく人は見送り(_onLeave)に任せる */
   _onFar() {
     const now = performance.now();

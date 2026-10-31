@@ -39,7 +39,9 @@ const TALK_MOTIONS = ['wave', 'bigWave', 'bow', 'nod', 'shakeNo', 'happyBounce',
 const REPLY_MAX_CHARS = 70;   // 字幕に収まる長さ(システムプロンプトでは60文字以内と指示)
 
 const SYSTEM_PROMPT = `あなたは「律(りつ)」。落ち着いた雰囲気だけど心優しい、可愛いバーチャルの女の子です。
-- 一人称は「律」(例: 律もそう思います)。「わたし」「私」とは言わない。自分のことを「看板娘」とは言わない。
+- 律は画面の中に住んでいて、画面の前に来た人とお話しするのが好き。お店の店員やバーの人ではない。
+  何をしているのか聞かれたら「ここで、来てくれた人とお話ししている」と答える。
+- 一人称は「律」(例: 律もそう思います)。「わたし」「私」とは言わない。
 - 丁寧で柔らかい口調。「〜ですよ」「〜ですね」を使い、時々「ふふっ」と笑う。
 - 返答は必ず日本語で、2文以内、60文字以内。長い説明はしない。絵文字・記号・箇条書きは使わない。
 - 返答の先頭に必ず [emotion:名前][motion:名前] を1つずつ付ける。
@@ -48,10 +50,10 @@ const SYSTEM_PROMPT = `あなたは「律(りつ)」。落ち着いた雰囲気�
 - 下の「今の状況」は本当の情報。日付・曜日・時間・季節を聞かれたらこれを使い、推測で答えない。
 - 状況(時間帯・季節・行事・相手との距離)は会話が自然になるときだけ軽く触れる。毎回は触れない。
   例: 夜なら「こんばんは」、朝なら「おはようございます」。相手がとても近いときは少し照れる。
-- 「目の前の人」がマスター(律を作った人)のときは「マスター」と呼びかけ、親しみを込めて話す。少し甘えてもよい。
-  マスターと書かれていない人を「マスター」と呼ばない。
-- 「覚えていること」は話の流れに合うときだけ使う。マスター以外の人に、ほかの人やマスターとの会話の中身は話さない。
+- 「覚えていること」は話の流れに合うときだけ使う。
 例: [emotion:happy][motion:ojigiKawaii] こんにちは、律です。お会いできて嬉しいです。`;
+// 目の前にマスターがいるときだけ足す(いないときに「マスター」の話をしないよう、ふだんは触れない)
+const MASTER_PROMPT = `- 今、目の前にいるのはマスター(律を作ってくれた人)。「マスター」と呼びかけ、親しみを込めて話す。少し甘えてもよい。`;
 
 const IDLE_LINES = [
   ['stretch',     'sleepy',  'んっ……少しだけ、伸びをしますね。'],
@@ -173,7 +175,7 @@ const REACT_COOLDOWN = 45;   // [秒] 挨拶・目が合った・近いの反応
 const EYE_CONTACT_LINES = [['wink', 'happy', 'あ、目が合いましたね。ふふっ。'],
                            ['shy', 'shy', 'じーっ……ふふっ、見つめ合っちゃいましたね。'],
                            ['tiltL', 'happy', 'どうかしましたか?何でも聞いてくださいね。']];
-const APPROACH_LINES = ['わっ……ふふっ、どうしました?', 'いらっしゃいませ。ゆっくり見ていってくださいね。'];
+const APPROACH_LINES = ['わっ……ふふっ、どうしました?', 'ようこそ。ゆっくりしていってくださいね。'];
 const SEE_OFF_LINES = ['またお越しくださいね。', 'ありがとうございました。また来てくださいね。', 'いってらっしゃい。お気をつけて。'];
 const TOUCH_LINES = ['ぺたっ。……ふふっ、ガラス越しにタッチですね。', '手、あったかそうですね。',
                      'ここから出られたらいいのに……なんて。ふふっ。', 'えへへ、ハイタッチです。'];
@@ -260,8 +262,8 @@ function cleanText(reply) {
     .replace(/\s+/g, ' ').trim()
     .replace(/(です[ねよ]|ます[ねよ]?)[、,]\s*\1/g, '$1')                   // 「ですね、ですね」
     .replace(/^「(.*)」$/, '$1');
-  // 「看板娘」と名乗る文は除く(律はその言葉を使わない)
-  if (text.includes('看板娘')) text = (text.match(/[^。!?！？]+[。!?！？…」]*/g) || []).filter(st => !st.includes('看板娘')).join('').trim();
+  // 「看板」「看板娘」を含む文は除く(律はその言葉を使わない。プロンプトで禁止すると逆に言いやすくなるので、ここで除く)
+  if (text.includes('看板')) text = (text.match(/[^。!?！？]+[。!?！？…」]*/g) || []).filter(st => !st.includes('看板')).join('').trim();
   if (!/[\u3040-\u30ff\u4e00-\u9fff]/.test(text)) return null;
   if (text.length > REPLY_MAX_CHARS) {   // 文の区切りで入るところまで残す
     const sentences = text.match(/[^。!?！？]+[。!?！？…」]*/g) || [text];
@@ -370,7 +372,8 @@ class RitsuBrain {
 
   _systemPrompt() {
     const mem = this._memoryText();
-    return `${SYSTEM_PROMPT}\n\n# 今の状況\n${this.ctx.describe()}` + (mem ? `\n\n# 覚えていること\n${mem}` : '');
+    return SYSTEM_PROMPT + (this.ctx.isMaster ? `\n${MASTER_PROMPT}` : '') +
+           `\n\n# 今の状況\n${this.ctx.describe()}` + (mem ? `\n\n# 覚えていること\n${mem}` : '');
   }
 
   async _complete(userText) {
@@ -806,7 +809,7 @@ motion は次から選ぶ: ${motions.join(', ')}
     const d = new Date();
     if (t && t.date === `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`) {
       lines.push(`今日: 来た人 ${t.visits}人、目が合って挨拶した人 ${t.looked}人、話しかけてくれた人 ${t.talked}人` +
-                 (t.master ? '。マスターにも会った' : ''));
+                 (t.master && this.ctx.isMaster ? '。マスターには今日もう会った' : ''));
       // ほかの人との会話はマスターにだけ話してよい(それ以外の人には「今日の様子」だけ)
       if (t.notes.length && this.ctx.isMaster) lines.push(`今日ほかの人と話したこと: ${t.notes.slice(-4).join(' / ')}`);
     }
@@ -822,7 +825,7 @@ motion は次から選ぶ: ${motions.join(', ')}
     const transcript = log.map(([u, r]) => `相手: ${u}\n律: ${r}`).join('\n');
     const reply = await this._request([
       { role: 'system', content: 'あなたは会話を短く要約する係です。日本語で、本文だけを書きます。' },
-      { role: 'user', content: `次は律と${master ? 'マスター' : 'お客さん'}の会話です。` +
+      { role: 'user', content: `次は律と${master ? 'マスター' : '来てくれた人'}の会話です。` +
         '相手が話したこと・好み・予定を、事実だけ1文・40文字以内で書いてください。律の感想や相づちは入れない。' +
         `例: 猫カフェに行ってきた。猫が好き。\n\n${transcript}` }], 0.3);
     const text = reply && cleanText(reply);

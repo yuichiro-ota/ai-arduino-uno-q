@@ -13,7 +13,7 @@
 const RITSU_CFG = (() => {
   const cfg = Object.assign({
     llmUrl: '/llm', llmModel: 'chat',
-    weather: null, llmTimeoutSec: 30, llmReact: true, learn: true, llmIdleChance: 0.67, idleSpeakChance: 0.75, idleMinSec: 10, idleMaxSec: 20, peekMinSec: 60, peekMaxSec: 120,
+    weather: null, llmTimeoutSec: 30, llmReact: true, learn: true, newsIdleChance: 0.2, llmIdleChance: 0.67, idleSpeakChance: 0.75, idleMinSec: 10, idleMaxSec: 20, peekMinSec: 60, peekMaxSec: 120,
     pixelRatio: 1.5, antialias: true, petals: 40, simpleMaterials: false,
   }, window.RITSU_CONFIG || {});
   const q = new URLSearchParams(location.search);
@@ -51,6 +51,8 @@ const SYSTEM_PROMPT = `あなたは「律(りつ)」。落ち着いた雰囲気�
 - 状況(時間帯・季節・行事・相手との距離)は会話が自然になるときだけ軽く触れる。毎回は触れない。
   例: 夜なら「こんばんは」、朝なら「おはようございます」。相手がとても近いときは少し照れる。
 - 「覚えていること」は話の流れに合うときだけ使う。
+- ニュースは「最近のニュースの見出し」の見出しだけを知っている。見出しに無いこと(詳しい内容・数字・理由)は推測で言わない。
+  ニュースの話は、聞かれたときや話題として自然なときだけ。政治や事件の話題には自分の意見を言わない。
 例: [emotion:happy][motion:ojigiKawaii] こんにちは、律です。お会いできて嬉しいです。`;
 // 目の前にマスターがいるときだけ足す(いないときに「マスター」の話をしないよう、ふだんは触れない)
 const MASTER_PROMPT = `- 今、目の前にいるのはマスター(律を作ってくれた人)。「マスター」と呼びかけ、親しみを込めて話す。少し甘えてもよい。`;
@@ -291,9 +293,12 @@ function parseDecision(reply, motions, allowWait) {
 class RitsuBrain {
   /** act({text, motion, emotion, source}) でキャラに反映。onStatus(ok) でLLMランプ更新、
    *  onThinking(on) で返事を考え中かどうかを通知。ctx は RitsuContext(今の状況) */
-  /** persist: { put(key, value), log(obj) } — 記憶と反応の記録を ROS 2 の memory ノードへ送る(kiosk 画面だけ) */
-  constructor({ act, onStatus, onThinking, ctx, persist }) {
+  /** persist: { put(key, value), log(obj) } — 記憶と反応の記録を ROS 2 の memory ノードへ送る(kiosk 画面だけ)
+   *  onQuery(n) — LLM に問い合わせ中の数(独り言・反応も含む。会話の要約は含まない)が変わったとき */
+  constructor({ act, onStatus, onThinking, onQuery, ctx, persist }) {
     this.act = act;
+    this.onQuery = onQuery || (() => {});
+    this.queries = 0;
     this.persist = persist || null;
     this.ctx = ctx || new RitsuContext();
     this.onStatus = onStatus || (() => {});
@@ -352,7 +357,9 @@ class RitsuBrain {
   }
 
   /** LiteLLM へ問い合わせて返答の本文を返す。失敗したら null */
-  async _request(messages, temperature, timeoutSec = RITSU_CFG.llmTimeoutSec) {
+  /** quiet: 吹き出しに「考え中」を出さない(人に見せない裏の問い合わせ) */
+  async _request(messages, temperature, timeoutSec = RITSU_CFG.llmTimeoutSec, quiet = false) {
+    if (!quiet) this.onQuery(++this.queries);
     try {
       const res = await fetch(`${RITSU_CFG.llmUrl}/v1/chat/completions`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -367,6 +374,8 @@ class RitsuBrain {
       console.warn('[brain] LLM error:', e);
       this.onStatus(false);
       return null;
+    } finally {
+      if (!quiet) this.onQuery(--this.queries);
     }
   }
 
@@ -443,7 +452,10 @@ class RitsuBrain {
     if (this.idleGenerating) return;
     this.idleGenerating = true;
     const startedChat = this.lastChat;
-    const topic = IDLE_TOPICS[Math.floor(Math.random() * IDLE_TOPICS.length)];
+    // ときどき最近のニュースの見出しを1つ選んで話題にする(見出し1つだけを渡し、ほかの内容を作らせない)
+    const news = this.ctx.news.length && Math.random() < RITSU_CFG.newsIdleChance ? pick(this.ctx.news) : null;
+    const topic = news ? `最近見たニュース「${news.title}」について、一言だけ感想をつぶやく(見出しに無いことは言わない)`
+                       : IDLE_TOPICS[Math.floor(Math.random() * IDLE_TOPICS.length)];
     const recent = this.recentLines.slice(-5).map(t => `- ${t}`).join('\n') || '- (なし)';
     const prompt = `(今は誰にも話しかけられていません。律として、ひとりごとをつぶやいてください)
 話題: ${topic}
@@ -733,6 +745,8 @@ motion は次から選ぶ: ${motions.join(', ')}
   /** memory ノードから届いた記憶(/ritsu/memory)。最初の1回だけ読み込み、それ以降は自分の記憶を正とする */
   onMemory(m) {
     if (m.stats) this.stats = this._mergeStats(m.stats);
+    if (m.news && Array.isArray(m.news.items))
+      this.ctx.news = m.news.items.filter(n => n && typeof n.title === 'string').map(n => ({ title: n.title.slice(0, 60), cat: String(n.cat || '') }));
     if (this.memoryLoaded) return;
     this.memoryLoaded = true;
     const local = this.memory;
@@ -827,7 +841,7 @@ motion は次から選ぶ: ${motions.join(', ')}
       { role: 'system', content: 'あなたは会話を短く要約する係です。日本語で、本文だけを書きます。' },
       { role: 'user', content: `次は律と${master ? 'マスター' : '来てくれた人'}の会話です。` +
         '相手が話したこと・好み・予定を、事実だけ1文・40文字以内で書いてください。律の感想や相づちは入れない。' +
-        `例: 猫カフェに行ってきた。猫が好き。\n\n${transcript}` }], 0.3);
+        `例: 猫カフェに行ってきた。猫が好き。\n\n${transcript}` }], 0.3, RITSU_CFG.llmTimeoutSec, true);
     const text = reply && cleanText(reply);
     if (!text) return;
     const d = new Date();

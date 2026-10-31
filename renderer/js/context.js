@@ -98,6 +98,7 @@ class RitsuContext {
   /** weather: { lat, lon, place, refreshMin } を渡すと天気を取得する(lat が無ければ取得しない) */
   constructor({ weather } = {}) {
     this.weather = null;            // { text, kind, temp, feels, max, min, rainProb, rainSoon, at }
+    this.news = [];                 // 最近のニュースの見出し [{title, cat}] (memory ノードが Yahoo!ニュースから取る)
     if (weather && weather.lat != null) this._startWeather(weather);
     this.personZ = null;            // 最後に見えた顔までの距離 [m]
     this.personXn = 0;              // 最後に見えた顔の左右の位置 x/z (カメラから見て右が+)
@@ -324,6 +325,9 @@ class RitsuContext {
       lines.push(`天気${this.weatherPlace ? `(${this.weatherPlace})` : ''}: ${w.text} ${r(w.temp)}℃(体感${r(w.feels)}℃) / ` +
                  `今日の最高${r(w.max)}℃・最低${r(w.min)}℃ / 降水確率${w.rainProb}%` +
                  (w.rainSoon ? ' / この後3時間以内に雨が降りそう' : ''));
+    }
+    if (this.news.length) {
+      lines.push(`最近のニュースの見出し: ${this.news.slice(0, 6).map(n => `${n.title}(${n.cat})`).join(' / ')}`);
     }
     if (this.personPresent) {
       const DIST = { near: 'すぐ目の前(とても近い)', mid: '話しやすい距離', far: '少し離れたところ' };

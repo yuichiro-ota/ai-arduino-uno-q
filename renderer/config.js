@@ -25,6 +25,10 @@ window.RITSU_CONFIG = {
   // false にすると毎回ランダムに選ぶ
   learn: true,
 
+  // 会話が無い間の LLM の独り言で、最近のニュースの見出し(memory ノードが Yahoo!ニュースから取る)を話題にする確率(0〜1)。
+  // ニュースは聞かれたときにも答える。取らないときは docker-compose の NEWS_FEEDS を空にする
+  newsIdleChance: 0.2,
+
   // 天気(Open-Meteo、APIキー不要)。設置場所の緯度・経度にする。null にすると天気を使わない
   //   UNO Q からインターネット(api.open-meteo.com)へ20分ごとに問い合わせる
   weather: { lat: 35.68, lon: 139.76, place: '東京', refreshMin: 20 },

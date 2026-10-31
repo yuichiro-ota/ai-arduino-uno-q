@@ -63,4 +63,5 @@ services:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
       - LEARN_DAYS=${LEARN_DAYS:-30}                # 反応の結果を何日分集計するか
       - TZ=${TZ:-Asia/Tokyo}                        # 記録の日付・時刻を日本時間にする
+      - NEWS_FEEDS=${NEWS_FEEDS-top-picks,entertainment,sports,science,it}   # 話題にするニュースの種類(空で取らない)
     command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && exec python3 ritsu_memory.py"]

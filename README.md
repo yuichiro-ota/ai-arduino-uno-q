@@ -28,6 +28,8 @@ iPhone ─/remote─▶ nginx:8080 ─ /llm/* (+APIキー) ───────
 - 会話が無いと1〜2分に1回カメラが目元まで寄ってのぞき込む、話しかけると胸から上へ寄る、物音に振り向く
 - 一定間隔で独り言やダンスをする暇つぶし行動
 - **今の状況に合わせた会話**（`renderer/js/context.js`）: 日時・時間帯・季節・平日/土日/祝日（振替休日を含む）・季節の行事・天気（Open-Meteo、`config.js` の `weather` で場所を設定）・カメラ前の人の距離を LLM に渡し、会話が無い間は約20秒に1回しゃべり、そのうち約30秒に1回は LLM が状況から毎回違う独り言を作る（`config.js` の `idleMinSec` / `idleMaxSec` / `idleSpeakChance` / `llmIdleChance`）。残りは状況に合わせて用意したセリフから選ぶ。人が来たら時間帯に合った挨拶、帰ったらお見送り、とても近いと照れる
+- **最近のニュース**: memory ノードが30分ごとに Yahoo!ニュース・トピックスの見出し（主要・エンタメ・スポーツ・科学・IT）を取り、事件・事故・災害などの暗い見出しを除いて律に渡す。聞かれたら答え、会話が無い間の独り言でもときどき話題にする（`config.js` の `newsIdleChance`）。見出しに無い内容は推測で話さない
+- **考え中の「・・・」**: LLM に問い合わせている間は吹き出しに「・・・」を出す（話しかけへの返事はすぐ、独り言や反応は0.4秒たっても答えが無いときだけ）
 - **返答の検証**: LLM の返答から知らない表情・モーション名、崩れたタグ、記号、絵文字、名前の前置きを取り除き、長すぎる返答は文の区切りで切る。日本語でない返答は使わない
 - `renderer/models/avatar.vrm` を差し替えるだけで別の VRM（0.x / 1.0）に変えられる。ファイルが無い場合は内蔵モデルで起動する
 
@@ -40,7 +42,7 @@ iPhone ─/remote─▶ nginx:8080 ─ /llm/* (+APIキー) ───────
 | `nginx/default.conf.template` | 起動時に `.env` の値を埋め込む nginx 設定。`/llm/` を LiteLLM に中継してキーを付ける。`/rosbridge` を rosbridge に中継、`/remote` で入力ページを返す |
 | `ros/Dockerfile` | ROS 2 Jazzy のイメージ（rosbridge、Orbbec SDK、OpenCV、顔検出モデル YuNet、顔の見分けモデル SFace） |
 | `ros/ritsu_perception.py` | 人検出・傾き・マスターの顔の見分けの ROS 2 ノード |
-| `ros/ritsu_memory.py` | 記憶（`data/memory.json`）と反応の記録（`data/log/`）の ROS 2 ノード |
+| `ros/ritsu_memory.py` | 記憶（`data/memory.json`）と反応の記録（`data/log/`）、ニュースの見出しの取得の ROS 2 ノード |
 | `data/` | 記憶・反応の記録・登録した顔の数値（UNO Q の中だけ。Git の管理外） |
 | `renderer/config.js` | モデル名（`chat` / `chat-large`）、タイムアウト、暇つぶし・のぞき込みの間隔、描画の重さ |
 | `renderer/index.html` | 画面（three.js / three-vrm / roslib.js は jsdelivr CDN から読み込み） |
@@ -139,13 +141,19 @@ sudo reboot
 | `/ritsu/person_id` | `std_msgs/String` | 人検出 → 画面の律 | JSON `{"id":"master"または"","score":0.52}` 顔で見分けた相手。変化したとき＋2秒ごと（顔を登録していないときは送らない） |
 | `/ritsu/enroll` | `std_msgs/String` | 入力ページ → 人検出 | JSON `{"action":"add"}` でマスターの顔を登録（約4秒で6枚）、`{"action":"clear"}` で消す |
 | `/ritsu/enroll_status` | `std_msgs/String` | 人検出 → 入力ページ | JSON `{"state":"capturing/done/failed/cleared","count":n}` |
-| `/ritsu/memory` | `std_msgs/String` | 記憶 → 画面の律 | JSON 覚えていること `today` / `master` と反応の結果 `stats`。5秒ごと |
+| `/ritsu/memory` | `std_msgs/String` | 記憶 → 画面の律 | JSON 覚えていること `today` / `master`、反応の結果 `stats`、ニュースの見出し `news`。5秒ごと |
 | `/ritsu/memory_put` | `std_msgs/String` | 画面の律（kiosk） → 記憶 | JSON `{"key":"today/master","value":{...}}` |
 | `/ritsu/log` | `std_msgs/String` | 画面の律（kiosk） → 記憶 | JSON 来訪・反応・その結果の記録（`data/log/日付.jsonl` に追記） |
 
 - `/ritsu/chat_user` に応答するのは、URL に `?kiosk=1` を付けて開いた画面（キオスク表示）だけです。PC などで `index.html` を開いて確認しても、二重に返事をしません。
 - ROS 2 のコマンドで試す例: `docker exec -it ritsu-camera bash -c "source /opt/ros/jazzy/setup.bash && ros2 topic echo /ritsu/person"`
 - 別のマシン（台車の Jetson など）の ROS 2 からも、同じネットワーク・同じ `ROS_DOMAIN_ID`（既定 0）ならトピックが見えます。
+
+## 記憶・ニュース（memory ノード）
+
+- 環境変数: `LEARN_DAYS`（反応の結果を集計する日数、既定 30）、`NEWS_FEEDS`（Yahoo!ニュース・トピックスの種類をカンマ区切り。既定 `top-picks,entertainment,sports,science,it`。ほかに `domestic` `world` `business` `local`。空にするとニュースを取らない）
+- 除く見出しの言葉は `ros/ritsu_memory.py` の `NEWS_BLOCK`。取れた見出しは `docker logs ritsu-memory` に出る
+- Yahoo!ニュースの RSS は個人での利用を想定したもの。お店などで使うときは利用規約を確認してください
 
 ## 6. 深度カメラ（Orbbec Gemini 335）
 

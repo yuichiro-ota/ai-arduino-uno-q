@@ -120,12 +120,46 @@
   let talkLeft = 0;           // 口パク残り時間[秒]
   let visemeA = 0;
   function showSubtitle(text) {
+    stopThinking();
     subtitle.textContent = text;
     subtitle.classList.add('show');
     clearTimeout(subTimer);
     subTimer = setTimeout(() => subtitle.classList.remove('show'),
                           Math.max(3500, text.length * 220));
     talkLeft = text.length * 0.12;
+  }
+
+  /* ===== 考え中の「・・・」 =====
+   * LLM に問い合わせている間は吹き出しに「・・・」を出す。話しかけへの返事はすぐ、
+   * 独り言や反応は THINK_DELAY 秒たっても答えが無いときだけ(すぐ返るときにちらつかないように)。
+   * 別のセリフを表示している間は、独り言や反応の「・・・」でそれを消さない */
+  const THINK_DELAY = 0.4;
+  let thinkTimer = null;
+  const showingLine = () => subtitle.classList.contains('show') && !subtitle.classList.contains('thinking');
+  function startThinking() {
+    clearTimeout(thinkTimer);
+    thinkTimer = null;
+    if (subtitle.classList.contains('thinking')) return;
+    clearTimeout(subTimer);
+    subtitle.innerHTML = '<span>・</span><span>・</span><span>・</span>';
+    subtitle.classList.add('show', 'thinking');
+  }
+  function stopThinking() {
+    clearTimeout(thinkTimer);
+    thinkTimer = null;
+    subtitle.classList.remove('thinking');
+  }
+  function endThinking() {        // 返事が来ないまま終わった(何もしない・失敗)ときは吹き出しを閉じる
+    if (subtitle.classList.contains('thinking')) subtitle.classList.remove('show');
+    stopThinking();
+  }
+  function onQuery(n) {
+    if (n > 0) {
+      if (!thinkTimer && !showingLine() && !subtitle.classList.contains('thinking'))
+        thinkTimer = setTimeout(() => { if (brain.queries > 0 && !showingLine()) startThinking(); }, THINK_DELAY * 1000);
+    } else if (!brain.busy) {
+      endThinking();
+    }
   }
 
   /* ===== カメラワーク =====
@@ -281,7 +315,11 @@
       }
     },
     onStatus: ok => lampLlm.classList.toggle('on', ok),
-    onThinking: on => { if (RITSU_CFG.kiosk) pubBool('/ritsu/thinking', on); },
+    onThinking: on => {
+      if (on) startThinking(); else endThinking();
+      if (RITSU_CFG.kiosk) pubBool('/ritsu/thinking', on);
+    },
+    onQuery,
   });
   brain.ping();
   brain.startIdle();

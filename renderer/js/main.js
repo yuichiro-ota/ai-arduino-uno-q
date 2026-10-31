@@ -334,7 +334,8 @@
   brain.startIdle();
 
   /* ===== 声 (voice.js) =====
-   * MICランプ: 緑=聞いている / 黄=声を聞き取り中・文字にしている / 灰=マイクが使えない */
+   * MICランプ: 緑=聞いている / 薄い緑=今は聞いていない(人が映っていない・律が話している・返事を考え中) /
+   *           黄=声を聞き取り中・文字にしている / 灰=マイクが使えない */
   const lampMic = document.getElementById('lamp-mic');
   const AIZUCHI_MIN_SEC = 1.0;   // これより短い言葉(「はい」など)には相槌を打たない
   const THINK_FILLER_SEC = 1.5;  // 聞き取ってからこの秒数たっても返事が無ければ「えっと……」
@@ -355,7 +356,8 @@
       if (voice.filler('ack')) player.play('nod');
     },
     onState: st => {
-      lampMic.classList.toggle('on', st === 'ready');
+      lampMic.classList.toggle('on', st === 'ready' || st === 'paused');
+      lampMic.classList.toggle('paused', st === 'paused');
       lampMic.classList.toggle('idle', st === 'hearing' || st === 'recognizing');
       // 相手が話している間は、聞く姿勢になって小さくうなずく(声は出さない。相手の声と重なるため)
       clearInterval(listenNod);
@@ -475,6 +477,17 @@
     enroll: (action = 'add') => pubJson('/ritsu/enroll', { action }),
     memory: () => ({ ...brain.memory, stats: brain.stats }),
     voice: () => voice,
+    // マイクの音量を sec 秒ぶん表示する。話して level が threshold を超えれば声として拾える
+    micTest: (sec = 5) => {
+      if (!voice) return console.log('声が使えない画面です(?voice=1 を付ける)');
+      console.log('マイク:', voice.mic.device);
+      const t = setInterval(() => {
+        const m = voice.mic;
+        console.log(`level ${m.level.toFixed(3)} / threshold ${m.threshold.toFixed(3)} ${m.listening ? '聞いている' : '聞いていない(人がいない・話し中など)'}` +
+                    ` ${'#'.repeat(Math.min(40, Math.round(m.level * 400)))}`);
+      }, 250);
+      setTimeout(() => clearInterval(t), sec * 1000);
+    },
     speak: text => brain.act({ text, motion: 'talkGesture1', emotion: 'happy', source: 'llm' }),
     act: motion => brain.act({ motion }),
   };

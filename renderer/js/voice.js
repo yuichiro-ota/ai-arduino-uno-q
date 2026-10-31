@@ -25,7 +25,8 @@ const STT_HALLUCINATIONS = /^(ご視聴ありがとうございました|チャ�
 
 class RitsuVoice {
   /** cfg: config.js の voice / onText(text): 聞き取れた言葉 / canListen(): 今聞いてよいか /
-   *  onState(state): 'off' | 'ready' | 'hearing' | 'recognizing' (MIC ランプ用) / onRecognizing(on) /
+   *  onState(state): 'off' | 'ready' | 'paused'(人がいない・返事中などで聞いていない) | 'hearing' | 'recognizing'
+   *  (MIC ランプ用) / onRecognizing(on) /
    *  onSpeechEnd(sec): 相手が話し終わった(文字にする前。相槌用) */
   constructor(cfg, { onText, canListen, onState, onRecognizing, onSpeechEnd } = {}) {
     this.cfg = Object.assign({ stt: '/stt', tts: '/tts', speaker: 'WhiteCUL', style: 'ノーマル', speed: 1.0,
@@ -36,6 +37,7 @@ class RitsuVoice {
     this.onRecognizing = onRecognizing || (() => {});
     this.onSpeechEnd = onSpeechEnd || (() => {});
     this.fillers = { ack: [], think: [] };   // 相槌の音声(AudioBuffer)
+    this.mic = { level: 0, threshold: 0, listening: false, device: '' };   // マイクの様子(確認用。RITSU.micTest())
     this.ctx = null;
     this.speakerId = null;
     this.ttsOk = false;
@@ -200,6 +202,8 @@ class RitsuVoice {
       this.onState('off');
       return;
     }
+    this.mic.device = stream.getAudioTracks()[0] ? stream.getAudioTracks()[0].label : '';
+    console.log('[voice] mic:', this.mic.device);
     const src = this.ctx.createMediaStreamSource(stream);
     // ScriptProcessor は古い方式だが、UNO Q の Chromium でも確実に動き、ファイルを分けなくてよい
     const proc = this.ctx.createScriptProcessor(VOICE_FRAME, 1, 1);
@@ -207,7 +211,7 @@ class RitsuVoice {
     mute.gain.value = 0;                            // マイクの音はスピーカーへ流さない
     src.connect(proc).connect(mute).connect(this.ctx.destination);
     const frameSec = VOICE_FRAME / this.ctx.sampleRate;
-    let noise = 0.005, loud = 0, quiet = 0, inSpeech = false;
+    let noise = 0.005, loud = 0, quiet = 0, inSpeech = false, lastBusy = null;
     let chunks = [], pre = [];
     this.onState('ready');
     proc.onaudioprocess = e => {
@@ -216,12 +220,19 @@ class RitsuVoice {
       for (const v of x) sum += v * v;
       const rms = Math.sqrt(sum / x.length);
       const busy = this.speaking || performance.now() - this.speakEnd < VOICE_TAIL_SEC * 1000 || !this.canListen();
+      const th = Math.max(VOICE_MIN_RMS, noise * VOICE_NOISE_K);
+      this.mic.level = rms;
+      this.mic.threshold = th;
+      if (busy !== lastBusy) {                      // 聞く/聞かないが変わったらランプへ
+        lastBusy = busy;
+        this.mic.listening = !busy;
+        if (!inSpeech) this.onState(busy ? 'paused' : 'ready');
+      }
       if (busy) {                                   // 聞かない間は捨てる
-        if (inSpeech) this.onState('ready');
+        if (inSpeech) this.onState('paused');
         inSpeech = false; loud = 0; chunks = []; pre = [];
         return;
       }
-      const th = Math.max(VOICE_MIN_RMS, noise * VOICE_NOISE_K);
       if (!inSpeech) {
         noise += (rms - noise) * (rms < th ? 0.05 : 0.005);   // 周りの雑音の大きさをゆっくり追う
         pre.push(x);

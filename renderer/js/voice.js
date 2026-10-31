@@ -14,6 +14,9 @@ const VOICE_MAX_SEC = 12;          // 長すぎる話はここで区切る
 const VOICE_PREROLL = 8;           // 話し始めの前も少し含める [単位] (約350ms。語頭が切れないように)
 const VOICE_MIN_RMS = 0.012;       // 静かな部屋でも、これより小さい音は声とみなさない
 const VOICE_NOISE_K = 3;           // 周りの雑音の何倍の大きさなら声とみなすか
+// 相槌。返事を待たせずにすぐ言えるよう、話者が決まったら先に作っておく
+//   ack: 相手が話し終わった直後 / think: 返事を考えるのに時間がかかっているとき
+const FILLERS = { ack: ['うんうん', 'はい', 'なるほど', 'ふむふむ', 'うん'], think: ['えっと……', 'うーん、そうですね……'] };
 const VOICE_TAIL_SEC = 0.5;        // 律がしゃべり終えてから、この秒数はマイクを使わない(残響を拾わないように)
 // 無音や雑音から Whisper が作りがちな文(動画の締めの言葉など)。これだけなら捨てる
 // 「律ちゃん」の聞き違い(小さいモデルは「ただしちゃん」「りっちゃん」などと書く)を直す
@@ -22,14 +25,17 @@ const STT_HALLUCINATIONS = /^(ご視聴ありがとうございました|チャ�
 
 class RitsuVoice {
   /** cfg: config.js の voice / onText(text): 聞き取れた言葉 / canListen(): 今聞いてよいか /
-   *  onState(state): 'off' | 'ready' | 'hearing' | 'recognizing' (MIC ランプ用) / onRecognizing(on) */
-  constructor(cfg, { onText, canListen, onState, onRecognizing } = {}) {
+   *  onState(state): 'off' | 'ready' | 'hearing' | 'recognizing' (MIC ランプ用) / onRecognizing(on) /
+   *  onSpeechEnd(sec): 相手が話し終わった(文字にする前。相槌用) */
+  constructor(cfg, { onText, canListen, onState, onRecognizing, onSpeechEnd } = {}) {
     this.cfg = Object.assign({ stt: '/stt', tts: '/tts', speaker: 'WhiteCUL', style: 'ノーマル', speed: 1.0,
                                volume: 1.0, listen: true }, cfg || {});
     this.onText = onText || (() => {});
     this.canListen = canListen || (() => true);
     this.onState = onState || (() => {});
     this.onRecognizing = onRecognizing || (() => {});
+    this.onSpeechEnd = onSpeechEnd || (() => {});
+    this.fillers = { ack: [], think: [] };   // 相槌の音声(AudioBuffer)
     this.ctx = null;
     this.speakerId = null;
     this.ttsOk = false;
@@ -70,6 +76,7 @@ class RitsuVoice {
       this.speakerId = st.id;
       this.ttsOk = true;
       console.log(`[voice] speaker ${this.cfg.speaker}(${st.name}) = ${st.id}`);
+      this._prepareFillers();
     } catch (e) {
       console.warn('[voice] TTS unavailable:', e);
       this.ttsOk = false;
@@ -138,6 +145,27 @@ class RitsuVoice {
       this.speaking = true;
       src.start();
     });
+  }
+
+  /** 相槌の音声を先に作っておく(失敗した相槌は使わないだけ) */
+  async _prepareFillers() {
+    for (const [kind, texts] of Object.entries(FILLERS)) {
+      this.fillers[kind] = [];
+      for (const t of texts) {
+        try { this.fillers[kind].push(await this._synth(t)); } catch (e) { console.warn('[voice] filler:', t, e); }
+      }
+    }
+  }
+
+  /** 相槌を言う(kind: 'ack' | 'think')。読み上げ中なら言わない。言えたら true */
+  filler(kind) {
+    const list = this.fillers[kind];
+    if (!list || !list.length || this.speaking) return false;
+    const seq = ++this._seq;
+    this._play(list[Math.floor(Math.random() * list.length)]).then(() => {
+      if (seq === this._seq) { this.speaking = false; this.speakEnd = performance.now(); }
+    });
+    return true;
   }
 
   stop() {
@@ -213,7 +241,11 @@ class RitsuVoice {
         const speech = chunks.slice(0, chunks.length - Math.max(0, quiet - 2));   // 後ろの無音を落とす
         chunks = [];
         this.onState('ready');
-        if (speech.length * frameSec >= VOICE_MIN_SEC + VOICE_PREROLL * frameSec) this._recognize(speech);
+        const sec = speech.length * frameSec - VOICE_PREROLL * frameSec;
+        if (sec >= VOICE_MIN_SEC) {
+          this._recognize(speech);
+          this.onSpeechEnd(sec);
+        }
       }
     };
     this._keepAlive = [stream, src, proc];          // ガベージコレクトで止まらないように

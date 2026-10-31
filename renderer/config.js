@@ -33,8 +33,9 @@ window.RITSU_CONFIG = {
   //   speaker/style: VOICEVOX の声 / speed: 話す速さ / volume: 音量(0〜1。スピーカー本体でも調整できる)
   //   needPerson: カメラに人が映っている間だけ聞く(周りの話し声に答えないように)
   //   idleAloud: 誰もいないときの独り言も声に出す / listen: false で読み上げだけ(マイクを使わない)
+  //   aizuchi: 話し終わった直後に「うんうん」などと相槌を打つ確率(0〜1)
   voice: { stt: '/stt', tts: '/tts', speaker: 'WhiteCUL', style: 'ノーマル', speed: 1.05, volume: 1.0,
-           needPerson: true, idleAloud: false, listen: true },
+           needPerson: true, idleAloud: false, listen: true, aizuchi: 0.7 },
 
   // 天気(Open-Meteo、APIキー不要)。設置場所の緯度・経度にする。null にすると天気を使わない
   //   UNO Q からインターネット(api.open-meteo.com)へ20分ごとに問い合わせる

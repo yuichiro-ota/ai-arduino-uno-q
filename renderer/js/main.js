@@ -336,17 +336,33 @@
   /* ===== 声 (voice.js) =====
    * MICランプ: 緑=聞いている / 黄=声を聞き取り中・文字にしている / 灰=マイクが使えない */
   const lampMic = document.getElementById('lamp-mic');
+  const AIZUCHI_MIN_SEC = 1.0;   // これより短い言葉(「はい」など)には相槌を打たない
+  const THINK_FILLER_SEC = 1.5;  // 聞き取ってからこの秒数たっても返事が無ければ「えっと……」
+  const LISTEN_NOD_SEC = 2.2;    // 話を聞いている間のうなずきの間隔
+  let listenNod = null;
   voice = RITSU_CFG.voiceOn ? new RitsuVoice(RITSU_CFG.voice, {
     // 返事を考えている間と、(needPerson のとき)カメラに誰も映っていない間は聞かない(周りの話し声に答えないように)
     canListen: () => !brain.busy && (!RITSU_CFG.voice.needPerson || ctx.personPresent),
     onText: text => {
       if (chatOverRos()) pubJson('/ritsu/chat_user', { text, from: 'voice' });
       else brain.chat(text);
+      setTimeout(() => { if (brain.busy && voice.filler('think')) player.play('thinking'); }, THINK_FILLER_SEC * 1000);
     },
     onRecognizing: on => { if (on) startThinking(); else if (!brain.busy) endThinking(); },
+    // 相槌: 話し終わった直後に「うんうん」などとうなずく(短すぎる声・確率 aizuchi で間引く)
+    onSpeechEnd: sec => {
+      if (sec < AIZUCHI_MIN_SEC || Math.random() >= (RITSU_CFG.voice.aizuchi ?? 0.7)) return;
+      if (voice.filler('ack')) player.play('nod');
+    },
     onState: st => {
       lampMic.classList.toggle('on', st === 'ready');
       lampMic.classList.toggle('idle', st === 'hearing' || st === 'recognizing');
+      // 相手が話している間は、聞く姿勢になって小さくうなずく(声は出さない。相手の声と重なるため)
+      clearInterval(listenNod);
+      if (st === 'hearing') {
+        player.play('listening');
+        listenNod = setInterval(() => player.play('nodSmall'), LISTEN_NOD_SEC * 1000);
+      }
     },
   }) : null;
   if (voice) {

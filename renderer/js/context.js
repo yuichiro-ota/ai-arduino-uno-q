@@ -110,7 +110,8 @@ class RitsuContext {
     this.visitCount = 0;
     this.identity = '';             // 顔で見分けた相手 'master' | '' (/ritsu/person_id)
     this.idSeenAt = -Infinity;      // 最後に /ritsu/person_id が届いた時刻(顔の見分けが動いているか)
-    this.listeners = { arrive: [], leave: [], near: [], look: [], approach: [], touch: [], identify: [] };
+    this.listeners = { arrive: [], leave: [], near: [], look: [], approach: [], touch: [], identify: [], far: [] };
+    this._wasClose = false;         // この来訪で、遠い(FAR)より手前にいたか(離れたときの検出用)
     this._nearNotified = false;
     this._track = [];               // 直近の [時刻, z, xn] (近づく速さ・去った方向用)
     this._handSince = null;         // 画面のすぐ前に手が来た時刻
@@ -135,6 +136,7 @@ class RitsuContext {
       this._nearNotified = false;
       this.visit = { id: ++this.visitCount, looked: false, approached: false, master: this.identity === 'master' };
       this._track = [[now, z, xn]];
+      this._wasClose = false;
       this._emit('arrive', absent / 1000);   // 前回いなくなってからの秒数
       if (this.looking) this._onLookStart();
     }
@@ -143,6 +145,12 @@ class RitsuContext {
       this._emit('near', z);
     } else if (z > DISTANCE.NEAR + 0.2) {
       this._nearNotified = false;
+    }
+    // 離れた: 手前にいた人が、遠い(FAR)より向こうへ下がった(0.3m の幅を持たせて、境目で何度も知らせない)
+    if (z < DISTANCE.FAR - 0.3) this._wasClose = true;
+    else if (z > DISTANCE.FAR && this._wasClose) {
+      this._wasClose = false;
+      this._emit('far', z);
     }
     // ① 近づいてくる: 直近1秒ほどで APPROACH_SPEED [m/s] より速く近づいた(来訪ごとに1回)
     const old = this._track.find(([t]) => now - t >= 700);

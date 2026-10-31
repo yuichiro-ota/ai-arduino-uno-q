@@ -178,6 +178,9 @@ const EYE_CONTACT_LINES = [['wink', 'happy', 'あ、目が合いましたね。�
                            ['shy', 'shy', 'じーっ……ふふっ、見つめ合っちゃいましたね。'],
                            ['tiltL', 'happy', 'どうかしましたか?何でも聞いてくださいね。']];
 const APPROACH_LINES = ['わっ……ふふっ、どうしました?', 'ようこそ。ゆっくりしていってくださいね。'];
+const FAR_LINES = ['あれ……?ちょっと遠くて、よく見えないです。', 'どこへ行くんですか?ふふっ、ちゃんと見えていますよ。',
+                   'もう少し、近くに来てくれませんか?'];
+const FAR_COOLDOWN = 60;     // [秒] 離れた人をのぞき込む反応の間隔
 const SEE_OFF_LINES = ['またお越しくださいね。', 'ありがとうございました。また来てくださいね。', 'いってらっしゃい。お気をつけて。'];
 const TOUCH_LINES = ['ぺたっ。……ふふっ、ガラス越しにタッチですね。', '手、あったかそうですね。',
                      'ここから出られたらいいのに……なんて。ふふっ。', 'えへへ、ハイタッチです。'];
@@ -327,6 +330,8 @@ class RitsuBrain {
     this.ctx.on('identify', () => this._onIdentify());
     this.ctx.on('look', () => this._onLook());
     this.ctx.on('approach', () => this._onApproach());
+    this.ctx.on('far', () => this._onFar());
+    this.lastFar = -Infinity;
     this.ctx.on('leave', (stayedSec, dir, visit) => this._onLeave(stayedSec, dir, visit));
     this.ctx.on('near', () => this._onNear());
     this.ctx.on('touch', (dir, hand) => this._onTouch(dir, hand));
@@ -628,7 +633,7 @@ motion は次から選ぶ: ${motions.join(', ')}
       fallback: ['surprisedJump', 'excited', 'あっ、マスターでしたか。来てくれて嬉しいです。'] });
   }
 
-  /** ① こちらを見ながら近づいてきた: すぐ見上げ(反射)、何を言うかは LLM が決める。
+  /** ① こちらを見ながら近づいてきた: すぐ嬉しそうに迎え(反射)、何を言うかは LLM が決める。
    *  遠くで挨拶した直後に近づいてくることが多いので、挨拶の間隔(REACT_COOLDOWN)は待たない */
   _onApproach() {
     const now = performance.now();
@@ -637,9 +642,24 @@ motion は次から選ぶ: ${motions.join(', ')}
     const greet = !this.greeted;
     this.greeted = true;
     const who = this.ctx.isMaster ? 'マスターが' : '目の前の人が';
-    this._react('approach', `${who}こちらを見ながら近づいてきたので、見上げた。${greet ? 'まだ挨拶していない。' : ''}`, {
-      motions: ['lookUp'], needText: true, reflexMotion: 'lookUp',
-      fallback: ['lookUp', 'happy', (greet && greetingFor(this.ctx)) || pick(APPROACH_LINES)] });
+    const motion = pick(['happyBounce', 'wave']);
+    this._react('approach', `${who}こちらを見ながら近づいてきた。${greet ? 'まだ挨拶していない。' : ''}` +
+                  '近くに来てくれたことを嬉しそうに迎える。例: わっ、来てくれたんですね。ゆっくりしていってください。', {
+      motions: [motion], needText: true, reflexMotion: motion,
+      fallback: [motion, 'happy', (greet && greetingFor(this.ctx)) || pick(APPROACH_LINES)] });
+  }
+
+  /** こちらを見ていた人が遠くへ下がった: 画面の向こうをのぞき込み(カメラも寄る)、何を言うかは LLM が決める。
+   *  こちらを見ないまま去っていく人は見送り(_onLeave)に任せる */
+  _onFar() {
+    const now = performance.now();
+    if (!this.ctx.lookedWithin(2) || this.busy || this.deciding || (now - this.lastReact) / 1000 < 3 ||
+        (now - this.lastFar) / 1000 < FAR_COOLDOWN) return;
+    this.lastFar = this.lastReact = this.lastInteraction = this.lastPeek = now;
+    const who = this.ctx.isMaster ? 'マスター' : '目の前の人';
+    this._react('far', `${who}が少し離れたところへ下がった(まだこちらを見ている)。画面の向こうをのぞき込みながら、` +
+                'どうしたのか気にして声をかける。例: あれ?ちょっと遠くて見えにくいです。', {
+      motions: ['peek'], needText: true, reflexMotion: 'peek', fallback: ['peek', 'surprised', pick(FAR_LINES)] });
   }
 
   /** 来てから LINGER_SEC 秒以上たち、こちらを見たことがあり、話しかけてはこない人がいる */

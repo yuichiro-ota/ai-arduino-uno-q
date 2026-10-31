@@ -309,7 +309,8 @@ class RitsuContext {
   }
 
   /** LLM のシステムプロンプトに入れる「今の状況」 */
-  describe(d = new Date()) {
+  /** news: 最近のニュースの見出しも入れる(プロンプトが長くなり遅い LLM では重いので、ニュースの話のときだけ) */
+  describe(d = new Date(), { news = false } = {}) {
     const W = '日月火水木金土';
     const TOD = { lateNight: '深夜', earlyMorning: '早朝', morning: '朝', noon: '昼',
                   afternoon: '午後', evening: '夕方', night: '夜' };
@@ -334,7 +335,7 @@ class RitsuContext {
                  `今日の最高${r(w.max)}℃・最低${r(w.min)}℃ / 降水確率${w.rainProb}%` +
                  (w.rainSoon ? ' / この後3時間以内に雨が降りそう' : ''));
     }
-    if (this.news.length) {
+    if (news && this.news.length) {
       lines.push(`最近のニュースの見出し: ${this.news.slice(0, 6).map(n => `${n.title}(${n.cat})`).join(' / ')}`);
     }
     if (this.personPresent) {

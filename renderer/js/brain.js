@@ -36,6 +36,9 @@ const EMOTIONS = ['happy', 'excited', 'shy', 'surprised', 'sad', 'angry', 'sleep
 const TALK_MOTIONS = ['wave', 'bigWave', 'bow', 'nod', 'shakeNo', 'happyBounce', 'jump', 'clap', 'peace',
                       'thinking', 'heartPose', 'cheer', 'laugh', 'wink', 'tiltL', 'agree', 'talkGesture1',
                       'kyun', 'nekoPose', 'twirl', 'idolWink', 'blowKiss', 'pikoJump', 'ojigiKawaii'];
+const LLM_SLOW_SEC = 8;       // 返事にこれより時間がかかったら、LLM が混んでいるとみなす
+const LLM_REST_SEC = 90;      // 混んでいる・失敗したとき、独り言と反応で LLM を使わない秒数(会話は使う)
+const NEWS_RE = /ニュース|話題|最近|何かあった|世の中|出来事/;   // ニュースの見出しをプロンプトに入れる話しかけ
 const REPLY_MAX_CHARS = 70;   // 字幕に収まる長さ(システムプロンプトでは60文字以内と指示)
 
 const SYSTEM_PROMPT = `あなたは「律(りつ)」。落ち着いた雰囲気だけど心優しい、可愛いバーチャルの女の子です。
@@ -294,7 +297,7 @@ function parseDecision(reply, motions, allowWait) {
 }
 
 class RitsuBrain {
-  /** act({text, motion, emotion, source}) でキャラに反映。onStatus(ok) でLLMランプ更新、
+  /** act({text, motion, emotion, source}) でキャラに反映。onStatus(true | 'slow' | false) でLLMランプ更新、
    *  onThinking(on) で返事を考え中かどうかを通知。ctx は RitsuContext(今の状況) */
   /** persist: { put(key, value), log(obj) } — 記憶と反応の記録を ROS 2 の memory ノードへ送る(kiosk 画面だけ)
    *  onQuery(n) — LLM に問い合わせ中の数(独り言・反応も含む。会話の要約は含まない)が変わったとき */
@@ -302,6 +305,7 @@ class RitsuBrain {
     this.act = act;
     this.onQuery = onQuery || (() => {});
     this.queries = 0;
+    this.llmRestUntil = 0;       // この時刻までは独り言と反応で LLM を使わない(混んでいる・失敗した)
     this.persist = persist || null;
     this.ctx = ctx || new RitsuContext();
     this.onStatus = onStatus || (() => {});
@@ -365,6 +369,7 @@ class RitsuBrain {
   /** quiet: 吹き出しに「考え中」を出さない(人に見せない裏の問い合わせ) */
   async _request(messages, temperature, timeoutSec = RITSU_CFG.llmTimeoutSec, quiet = false) {
     if (!quiet) this.onQuery(++this.queries);
+    const started = performance.now();
     try {
       const res = await fetch(`${RITSU_CFG.llmUrl}/v1/chat/completions`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -373,10 +378,13 @@ class RitsuBrain {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
       const reply = (await res.json()).choices[0].message.content.trim();
-      this.onStatus(true);
+      const sec = (performance.now() - started) / 1000;
+      if (sec > LLM_SLOW_SEC) this.llmRestUntil = performance.now() + LLM_REST_SEC * 1000;
+      this.onStatus(sec > LLM_SLOW_SEC ? 'slow' : true);
       return reply;
     } catch (e) {
       console.warn('[brain] LLM error:', e);
+      this.llmRestUntil = performance.now() + LLM_REST_SEC * 1000;
       this.onStatus(false);
       return null;
     } finally {
@@ -384,14 +392,20 @@ class RitsuBrain {
     }
   }
 
-  _systemPrompt() {
+  _systemPrompt({ news = false } = {}) {
     const mem = this._memoryText();
     return SYSTEM_PROMPT + (this.ctx.isMaster ? `\n${MASTER_PROMPT}` : '') +
-           `\n\n# 今の状況\n${this.ctx.describe()}` + (mem ? `\n\n# 覚えていること\n${mem}` : '');
+           `\n\n# 今の状況\n${this.ctx.describe(new Date(), { news })}` + (mem ? `\n\n# 覚えていること\n${mem}` : '');
+  }
+
+  /** 独り言・反応で LLM を使ってよいか。ほかの問い合わせ中や、混んでいる・失敗した直後は使わない
+   *  (遅い LLM に問い合わせを重ねると、時間切れになった分まで溜まって、ずっと返事が来なくなるため) */
+  _llmFree() {
+    return this.queries === 0 && performance.now() >= this.llmRestUntil;
   }
 
   async _complete(userText) {
-    const messages = [{ role: 'system', content: this._systemPrompt() },
+    const messages = [{ role: 'system', content: this._systemPrompt({ news: NEWS_RE.test(userText) }) },
                       ...this.history.slice(-6),
                       { role: 'user', content: userText }];
     const reply = await this._request(messages, 0.9);
@@ -455,6 +469,11 @@ class RitsuBrain {
    *  作っている間に話しかけられたら捨てる。失敗したら用意したセリフで代わりに言う */
   async _llmIdleLine() {
     if (this.idleGenerating) return;
+    if (!this._llmFree()) {      // LLM が混んでいる間は用意したセリフで
+      const [motion, emotion, text] = this._pickIdleLine();
+      this.act({ text, motion, emotion, source: 'idle' });
+      return;
+    }
     this.idleGenerating = true;
     const startedChat = this.lastChat;
     // ときどき最近のニュースの見出しを1つ選んで話題にする(見出し1つだけを渡し、ほかの内容を作らせない)
@@ -516,7 +535,7 @@ ${recent}`;
       const [motion, emotion, text] = fallback;
       return { motion: reflexMotion ? null : motion, emotion, text, by: 'template' };
     };
-    if (!RITSU_CFG.llmReact) return useFallback();
+    if (!RITSU_CFG.llmReact || !this._llmFree()) return useFallback();
     const startedChat = this.lastChat;
     const visit = this.ctx.visit;
     const forms = ['- 話しかける: [emotion:名前][motion:名前] セリフ(1〜2文、40文字以内)'];

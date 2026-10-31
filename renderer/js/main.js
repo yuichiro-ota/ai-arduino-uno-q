@@ -314,7 +314,8 @@
         if (RITSU_CFG.kiosk) pubJson('/ritsu/say', { text, emotion, motion, source });
       }
     },
-    onStatus: ok => lampLlm.classList.toggle('on', ok),
+    // LLMランプ: 緑=返事が来ている / 黄=返事が遅い(独り言・反応は用意したセリフにしている) / 灰=つながらない・失敗
+    onStatus: st => { lampLlm.classList.toggle('on', st === true); lampLlm.classList.toggle('idle', st === 'slow'); },
     onThinking: on => {
       if (on) startThinking(); else endThinking();
       if (RITSU_CFG.kiosk) pubBool('/ritsu/thinking', on);

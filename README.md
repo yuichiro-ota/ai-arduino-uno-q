@@ -1,4 +1,4 @@
-# 律 (Ritsu) — Arduino UNO Q 版バーチャル看板娘 (VRM + three.js + ROS 2)
+# 律 (Ritsu) — Arduino UNO Q 版バーチャルキャラクター (VRM + three.js + ROS 2)
 
 VRMモデル「律」を Arduino UNO Q の画面に表示し、会話・視線追従・カメラの傾きへの反応を行います。
 センサーと画面のやり取りは **ROS 2 (Jazzy)** で行い、ブラウザ（画面の律・iPhone の入力ページ）は rosbridge 経由で ROS 2 につながります。将来、台車（メカナムホイール）のノードも同じ ROS 2 に足せます。

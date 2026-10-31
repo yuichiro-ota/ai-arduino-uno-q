@@ -38,8 +38,9 @@ const TALK_MOTIONS = ['wave', 'bigWave', 'bow', 'nod', 'shakeNo', 'happyBounce',
                       'kyun', 'nekoPose', 'twirl', 'idolWink', 'blowKiss', 'pikoJump', 'ojigiKawaii'];
 const REPLY_MAX_CHARS = 70;   // 字幕に収まる長さ(システムプロンプトでは60文字以内と指示)
 
-const SYSTEM_PROMPT = `あなたは「律(りつ)」。落ち着いた雰囲気だけど心優しい、可愛いバーチャル看板娘です。
-- 一人称は「わたし」。丁寧で柔らかい口調。「〜ですよ」「〜ですね」を使い、時々「ふふっ」と笑う。
+const SYSTEM_PROMPT = `あなたは「律(りつ)」。落ち着いた雰囲気だけど心優しい、可愛いバーチャルの女の子です。
+- 一人称は「律」(例: 律もそう思います)。「わたし」「私」とは言わない。自分のことを「看板娘」とは言わない。
+- 丁寧で柔らかい口調。「〜ですよ」「〜ですね」を使い、時々「ふふっ」と笑う。
 - 返答は必ず日本語で、2文以内、60文字以内。長い説明はしない。絵文字・記号・箇条書きは使わない。
 - 返答の先頭に必ず [emotion:名前][motion:名前] を1つずつ付ける。
   emotion: ${EMOTIONS.join(', ')}
@@ -82,7 +83,7 @@ const NOTICE_LINES = [
 
 /* ---- 状況に合わせた独り言 [motion, emotion, text] (context.js の RitsuContext を参照) ---- */
 const TOD_LINES = {
-  earlyMorning: [['stretch', 'sleepy', 'ふぁ……朝早いですね。わたしも、まだ少し眠たいです。']],
+  earlyMorning: [['stretch', 'sleepy', 'ふぁ……朝早いですね。律も、まだ少し眠たいです。']],
   morning:      [['cheer', 'happy', '朝の空気って、気持ちいいですね。'],
                  ['stretch', 'happy', 'んーっ……今日も一日、始まりますね。']],
   noon:         [['thinking', 'neutral', 'そろそろお昼ごはんの時間ですね。何にしようかな……']],
@@ -182,7 +183,7 @@ const IDLE_LLM_MOTIONS = ['nodSlow', 'tiltL', 'tiltR', 'lookAround', 'rhythmSway
                           'wink', 'stretch', 'thinking', 'talkGesture2', 'mojimoji'];
 // LLM に独り言を作らせるときの話題(毎回1つ選ぶ)
 const IDLE_TOPICS = ['今の時間帯のこと', '今の季節のこと', '季節の行事や、今日が何曜日か',
-                     '目の前の人(いれば)へのさりげない声かけ', '看板娘のお仕事のこと',
+                     '目の前の人(いれば)へのさりげない声かけ', '律が毎日ここで過ごしていること',
                      '好きな食べ物や飲み物のこと', '今の天気や気温のこと(状況に天気が無ければ空気の感じを想像して)',
                      'ちょっとした思いつき'];   // [秒] 来た・帰った・近いの反応どうしの間隔
 
@@ -255,9 +256,12 @@ function cleanText(reply) {
     .replace(/\p{Extended_Pictographic}|\uFE0F/gu, '')           // 絵文字
     .replace(/^\s*(律|りつ|Ritsu|assistant)\s*[:：]\s*/i, '')     // 名前の前置き
     .replace(/[呢吗]/g, '')                                      // 小さいモデルが混ぜる中国語の語気助詞
+    .replace(/わたくし|わたし|私(?![たど達])/g, '律')                // 一人称は「律」
     .replace(/\s+/g, ' ').trim()
     .replace(/(です[ねよ]|ます[ねよ]?)[、,]\s*\1/g, '$1')                   // 「ですね、ですね」
     .replace(/^「(.*)」$/, '$1');
+  // 「看板娘」と名乗る文は除く(律はその言葉を使わない)
+  if (text.includes('看板娘')) text = (text.match(/[^。!?！？]+[。!?！？…」]*/g) || []).filter(st => !st.includes('看板娘')).join('').trim();
   if (!/[\u3040-\u30ff\u4e00-\u9fff]/.test(text)) return null;
   if (text.length > REPLY_MAX_CHARS) {   // 文の区切りで入るところまで残す
     const sentences = text.match(/[^。!?！？]+[。!?！？…」]*/g) || [text];
@@ -438,7 +442,7 @@ class RitsuBrain {
     const startedChat = this.lastChat;
     const topic = IDLE_TOPICS[Math.floor(Math.random() * IDLE_TOPICS.length)];
     const recent = this.recentLines.slice(-5).map(t => `- ${t}`).join('\n') || '- (なし)';
-    const prompt = `(今は誰にも話しかけられていません。看板娘として、ひとりごとをつぶやいてください)
+    const prompt = `(今は誰にも話しかけられていません。律として、ひとりごとをつぶやいてください)
 話題: ${topic}
 条件: 1文、40文字以内。いつもの丁寧で柔らかい口調。「今の状況」の日付と矛盾しない内容にする。
 motion はつぶやきの内容に合うものを選ぶ(thinking ばかりにしない)。
@@ -498,7 +502,7 @@ ${recent}`;
     const forms = ['- 話しかける: [emotion:名前][motion:名前] セリフ(1〜2文、40文字以内)'];
     if (!needText) forms.push('- 動きだけ(何も言わない): [emotion:名前][motion:名前]');
     if (allowWait) forms.push('- 何もしない: [wait]');
-    const prompt = `(カメラで見た出来事に、看板娘としてどう反応するか決めてください。まだ話しかけられてはいません)
+    const prompt = `(カメラで見た出来事に、律としてどう反応するか決めてください。まだ話しかけられてはいません)
 出来事: ${situation}
 次のどれか1つの形だけで答える:
 ${forms.join('\n')}
@@ -818,7 +822,7 @@ motion は次から選ぶ: ${motions.join(', ')}
     const transcript = log.map(([u, r]) => `相手: ${u}\n律: ${r}`).join('\n');
     const reply = await this._request([
       { role: 'system', content: 'あなたは会話を短く要約する係です。日本語で、本文だけを書きます。' },
-      { role: 'user', content: `次は看板娘の律と${master ? 'マスター' : 'お客さん'}の会話です。` +
+      { role: 'user', content: `次は律と${master ? 'マスター' : 'お客さん'}の会話です。` +
         '相手が話したこと・好み・予定を、事実だけ1文・40文字以内で書いてください。律の感想や相づちは入れない。' +
         `例: 猫カフェに行ってきた。猫が好き。\n\n${transcript}` }], 0.3);
     const text = reply && cleanText(reply);

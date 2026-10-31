@@ -1,4 +1,4 @@
-# 律 (Ritsu) — Arduino UNO Q 版バーチャル看板娘 (VRM + three.js + ROS 2)
+# 律 (Ritsu) — Arduino UNO Q 版バーチャルキャラクター (VRM + three.js + ROS 2)
 #   renderer   : 静的ファイル(HTML / three.js / VRM)を nginx で配信
 #                /llm/ を LiteLLM (CT201) へ中継し APIキーはサーバー側で付与、/rosbridge を rosbridge へ中継
 #   rosbridge  : ROS 2 とブラウザ(画面の律・iPhone の入力ページ)をつなぐ WebSocket (9090)

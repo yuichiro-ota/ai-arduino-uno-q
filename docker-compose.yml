@@ -2,8 +2,9 @@
 #   renderer   : 静的ファイル(HTML / three.js / VRM)を nginx で配信
 #                /llm/ を LiteLLM (CT201) へ中継し APIキーはサーバー側で付与、/rosbridge を rosbridge へ中継
 #   rosbridge  : ROS 2 とブラウザ(画面の律・iPhone の入力ページ)をつなぐ WebSocket (9090)
-#   perception : 深度カメラ(Orbbec Gemini 335)の人検出・傾き ROS 2 ノード
-#   ROS 2 の2つはホストネットワーク + ipc: host (同じホスト内のDDS共有メモリ通信のため)。
+#   perception : 深度カメラ(Orbbec Gemini 335)の人検出・傾き・マスターの顔の見分け ROS 2 ノード
+#   memory     : 律の記憶(今日のこと・マスターとの話)と反応の記録を ./data に残す ROS 2 ノード
+#   ROS 2 の3つはホストネットワーク + ipc: host (同じホスト内のDDS共有メモリ通信のため)。
 #   台車のノードや別マシン(Jetson 等)の ROS 2 とも、同じネットワーク・同じ ROS_DOMAIN_ID ならつながる。
 
 x-ros: &ros
@@ -41,6 +42,7 @@ services:
     volumes:
       - /dev/bus/usb:/dev/bus/usb
       - ./renderer/debug:/app/debug                 # DEBUG_SNAPSHOT=1 のとき camera.jpg を保存(:8080/debug/camera.jpg)
+      - ./data:/data                                # 登録したマスターの顔の特徴 (data/faces/master.npy)
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
       - CAMERA_ROTATE=${CAMERA_ROTATE:-0}           # カメラを縦置きしたとき 90/180/270
@@ -49,4 +51,16 @@ services:
       - IMU_ROLL_SIGN=${IMU_ROLL_SIGN:--1}          # Gemini 335 実機では -1 で傾けた側へよろける
       - LOOK_YAW=${LOOK_YAW:-0.2}                   # 顔の向きがこれ以内なら「こちらを見ている」(大きいほど甘い)
       - TOUCH_DIST=${TOUCH_DIST:-0.45}              # [m] これより近い手に、律が内側から手を合わせる
+      - MASTER_MATCH=${MASTER_MATCH:-0.40}          # 登録した顔とみなす類似度(上げるほど厳しい)
     command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && exec python3 ritsu_perception.py"]
+
+  memory:
+    <<: *ros
+    container_name: ritsu-memory
+    volumes:
+      - ./data:/data                                # memory.json(覚えていること) / log/日付.jsonl(反応の記録)
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - LEARN_DAYS=${LEARN_DAYS:-30}                # 反応の結果を何日分集計するか
+      - TZ=${TZ:-Asia/Tokyo}                        # 記録の日付・時刻を日本時間にする
+    command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && exec python3 ritsu_memory.py"]

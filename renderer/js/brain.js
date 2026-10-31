@@ -1,13 +1,19 @@
 /* =========================================================================
- * brain.js — 会話(LiteLLM経由でOllama) / 暇つぶし行動
+ * brain.js — 会話(LiteLLM経由でOllama) / 暇つぶし行動 / カメラで見た出来事への反応 / 記憶 / 反応の学習
  *   LiteLLM の OpenAI互換API (/v1/chat/completions) をブラウザから直接呼ぶ。
  *   返答先頭の [emotion:x][motion:y] タグを解析してキャラへ反映する。
+ *
+ *   反応は3層: 反射(視線・手を合わせる・見送り・よろける)は決めた動きですぐ返す /
+ *   来た・目が合った・近づいた・いてくれる人への反応は、LLM が状況を見て「何を言うか・どう動くか・何もしないか」を
+ *   決める(間に合わなければ用意したセリフ) / 会話は LLM。
+ *   挨拶と、いてくれる人への声かけは「やり方」を何通りか用意し、そのあと相手が話しかけてくれたか・
+ *   どれだけ居てくれたかを記録して、結果のよいやり方を多めに選ぶ(反応の学習)。
  * ========================================================================= */
 
 const RITSU_CFG = (() => {
   const cfg = Object.assign({
     llmUrl: '/llm', llmModel: 'chat',
-    weather: null, llmTimeoutSec: 30, llmIdleChance: 0.67, idleSpeakChance: 0.75, idleMinSec: 10, idleMaxSec: 20, peekMinSec: 60, peekMaxSec: 120,
+    weather: null, llmTimeoutSec: 30, llmReact: true, learn: true, llmIdleChance: 0.67, idleSpeakChance: 0.75, idleMinSec: 10, idleMaxSec: 20, peekMinSec: 60, peekMaxSec: 120,
     pixelRatio: 1.5, antialias: true, petals: 40, simpleMaterials: false,
   }, window.RITSU_CONFIG || {});
   const q = new URLSearchParams(location.search);
@@ -41,6 +47,9 @@ const SYSTEM_PROMPT = `あなたは「律(りつ)」。落ち着いた雰囲気�
 - 下の「今の状況」は本当の情報。日付・曜日・時間・季節を聞かれたらこれを使い、推測で答えない。
 - 状況(時間帯・季節・行事・相手との距離)は会話が自然になるときだけ軽く触れる。毎回は触れない。
   例: 夜なら「こんばんは」、朝なら「おはようございます」。相手がとても近いときは少し照れる。
+- 「目の前の人」がマスター(律を作った人)のときは「マスター」と呼びかけ、親しみを込めて話す。少し甘えてもよい。
+  マスターと書かれていない人を「マスター」と呼ばない。
+- 「覚えていること」は話の流れに合うときだけ使う。マスター以外の人に、ほかの人やマスターとの会話の中身は話さない。
 例: [emotion:happy][motion:ojigiKawaii] こんにちは、律です。お会いできて嬉しいです。`;
 
 const IDLE_LINES = [
@@ -182,6 +191,43 @@ const IDLE_MOTIONS_ONLY = ['nodSlow', 'lookAround', 'tiltR', 'stretch', 'happyBo
                            'danceC', 'sleepyNod', 'rhythmSway', 'pikoJump', 'mojimoji',
                            'guruguru', 'twirl'];
 
+/* ---- LLM に決めさせる反応 ---- */
+const DECIDE_TIMEOUT_SEC = 4;   // これより遅ければ用意したセリフで反応する(反応が遅れると不自然なので)
+const GREET_MOTIONS = ['wave', 'ojigiKawaii', 'bow', 'comeHere', 'happyBounce', 'greetIdol'];
+const REACT_MOTIONS = ['wink', 'nod', 'tiltL', 'tiltR', 'happyBounce', 'shy', 'mojimoji', 'wave', 'peace', 'kyun', 'laugh'];
+const pick = a => a[Math.floor(Math.random() * a.length)];
+// 挨拶のやり方(どれが話しかけてもらいやすいかを記録して学ぶ)。fallback は LLM が間に合わないときのセリフ
+const GREET_STYLES = {
+  short:    { hint: '時間帯に合った挨拶だけを、短く明るく言う。例: こんにちは。いいお天気ですね。',
+              fallback: (ctx, far) => [far ? 'comeHere' : pick(['wave', 'ojigiKawaii']), 'happy', greetingFor(ctx)] },
+  invite:   { hint: '挨拶して、気軽に話しかけてほしいと伝える。例: こんにちは。よかったら、話しかけてくださいね。',
+              fallback: (ctx, far) => [far ? 'comeHere' : 'wave', 'happy',
+                                       greetingFor(ctx) + (far ? 'よかったら、近くへどうぞ。' : 'よかったら、話しかけてくださいね。')] },
+  question: { hint: '挨拶して、相手が答えやすい簡単な質問を1つする(今日の予定・天気・季節の話など)。必ず「?」で終わる。' +
+                    '例: こんにちは。今日はお出かけですか?',
+              fallback: (ctx, far) => [far ? 'comeHere' : 'ojigiKawaii', 'happy',
+                                       greetingFor(ctx) + pick(['今日はお出かけですか?', '何かお探しですか?'])] },
+};
+// しばらく居てくれる人(話しかけてはこない)への声かけのやり方
+const LINGER_SEC = 8;           // 来てからこの秒数たち、こちらを見たことがある人に声をかける
+const LINGER_STYLES = {
+  quiet:    { hint: null },     // 声はかけず、動きだけ
+  comment:  { hint: '今の状況(時間帯・天気・季節など)について、目の前の人に軽く一言話しかける',
+              fallback: ctx => pick(situationalLines(ctx)) },
+  question: { hint: '目の前の人に、答えやすい簡単な質問を1つする。必ず「?」で終わる',
+              fallback: () => pick([['tiltL', 'happy', '何か気になるものはありましたか?'],
+                                    ['wave', 'happy', 'よかったら、お話ししませんか?'],
+                                    ['tiltR', 'happy', '今日はどちらからいらしたんですか?']]) },
+};
+const OUTCOME_SEC = 30;          // 反応のあとこの秒数のうちに話しかけてくれたら 1、居てくれた時間に応じて 0〜0.6
+const LEARN_MIN_TRIALS = 5;      // どのやり方もこの回数試すまでは、試した回数の少ないものを選ぶ
+const LEARN_EXPLORE = 0.2;       // それ以降も、この確率で結果に関係なく選ぶ(好みの変化に追いつくため)
+
+/* ---- 記憶 ---- */
+const TODAY_NOTES_MAX = 8;       // 今日の会話の要約をいくつ覚えるか
+const MASTER_NOTES_MAX = 12;     // マスターとの会話の要約をいくつ覚えるか
+const MEMORY_WAIT_SEC = 10;      // 起動後この秒数のうちに保存した記憶が届かなければ、空の記憶で始める
+
 const TAG_RE = /\[(emotion|motion):([a-zA-Z0-9_]+)\]/g;
 const QUEUE_MAX = 5;   // 返事中に届いた話しかけを順番待ちさせる上限
 const FALLBACK_REPLY = '[emotion:shy][motion:tiltL] ごめんなさい、少し考えごとをしていました。もう一度お願いできますか?';
@@ -197,6 +243,12 @@ function validateReply(reply) {
     if (kind === 'emotion' && EMOTIONS.includes(name)) emotion = name;
     if (kind === 'motion' && typeof MOTIONS !== 'undefined' && MOTIONS[name]) motion = name;
   }
+  const text = cleanText(reply);
+  return text ? { text, emotion, motion } : null;
+}
+
+/** 返答からタグ・記号などを除いた本文。日本語を含まなければ null */
+function cleanText(reply) {
   let text = reply.replace(TAG_RE, '')
     .replace(/\[[^\]]*\]/g, '')                               // 崩れたタグ
     .replace(/[*#`_>~|]/g, '')                                  // マークダウン記号
@@ -204,6 +256,7 @@ function validateReply(reply) {
     .replace(/^\s*(律|りつ|Ritsu|assistant)\s*[:：]\s*/i, '')     // 名前の前置き
     .replace(/[呢吗]/g, '')                                      // 小さいモデルが混ぜる中国語の語気助詞
     .replace(/\s+/g, ' ').trim()
+    .replace(/(です[ねよ]|ます[ねよ]?)[、,]\s*\1/g, '$1')                   // 「ですね、ですね」
     .replace(/^「(.*)」$/, '$1');
   if (!/[\u3040-\u30ff\u4e00-\u9fff]/.test(text)) return null;
   if (text.length > REPLY_MAX_CHARS) {   // 文の区切りで入るところまで残す
@@ -212,14 +265,30 @@ function validateReply(reply) {
     for (const st of sentences) { if ((cut + st).length > REPLY_MAX_CHARS) break; cut += st; }
     text = cut.trim() || text.slice(0, REPLY_MAX_CHARS - 1) + '…';
   }
-  return { text, emotion, motion };
+  return text;
+}
+
+/** 出来事への反応の返答を読む: {wait} / {emotion, motion, text|null}。読めなければ null。
+ *  motion は motions のどれか(知らない名前なら先頭) */
+function parseDecision(reply, motions, allowWait) {
+  if (/\[wait\]/i.test(reply)) return allowWait ? { wait: true } : null;
+  let emotion = null, motion = null;
+  for (const [, kind, name] of reply.matchAll(TAG_RE)) {
+    if (kind === 'emotion' && EMOTIONS.includes(name)) emotion = name;
+    if (kind === 'motion' && motions.includes(name)) motion = name;
+  }
+  const text = cleanText(reply);
+  if (!emotion && !motion && !text) return null;
+  return { emotion: emotion || 'happy', motion: motion || motions[0], text };
 }
 
 class RitsuBrain {
   /** act({text, motion, emotion, source}) でキャラに反映。onStatus(ok) でLLMランプ更新、
    *  onThinking(on) で返事を考え中かどうかを通知。ctx は RitsuContext(今の状況) */
-  constructor({ act, onStatus, onThinking, ctx }) {
+  /** persist: { put(key, value), log(obj) } — 記憶と反応の記録を ROS 2 の memory ノードへ送る(kiosk 画面だけ) */
+  constructor({ act, onStatus, onThinking, ctx, persist }) {
     this.act = act;
+    this.persist = persist || null;
     this.ctx = ctx || new RitsuContext();
     this.onStatus = onStatus || (() => {});
     this.onThinking = onThinking || (() => {});
@@ -235,12 +304,21 @@ class RitsuBrain {
     this.absentSec = 0;          // 今回の来訪の前に、いなかった秒数
     this.lastEyeContact = -Infinity;
     this.lastTouch = -Infinity;
-    this.ctx.on('arrive', absentSec => { this.greeted = false; this.absentSec = absentSec; this.visitStart = performance.now(); });
+    this.memory = { today: null, master: null };   // 覚えていること(memory ノードが保存)
+    this.memoryLoaded = false;
+    this.stats = {};             // 反応のやり方ごとの結果 { 反応: { やり方: [回数, 合計] } }
+    this.pending = [];           // 結果を待っている反応
+    this.visitLog = [];          // 今回の来訪での会話 [[相手, 律], ...] (去ったら要約して覚える)
+    this.lastLinger = -Infinity;
+    setTimeout(() => { if (!this.memoryLoaded) this.onMemory({}); }, MEMORY_WAIT_SEC * 1000);
+    setInterval(() => this._settleOutcomes(), 1000);
+    this.ctx.on('arrive', absentSec => this._onArrive(absentSec));
+    this.ctx.on('identify', () => this._onIdentify());
     this.ctx.on('look', () => this._onLook());
     this.ctx.on('approach', () => this._onApproach());
     this.ctx.on('leave', (stayedSec, dir, visit) => this._onLeave(stayedSec, dir, visit));
     this.ctx.on('near', () => this._onNear());
-    this.ctx.on('touch', dir => this._onTouch(dir));
+    this.ctx.on('touch', (dir, hand) => this._onTouch(dir, hand));
   }
 
   async chat(userText) {
@@ -256,7 +334,10 @@ class RitsuBrain {
     this.lastInteraction = performance.now();
     this.act({ motion: 'listening' });
 
+    if (this.ctx.personPresent && this.visitLog.length === 0 && !this.ctx.isMaster) this._bumpToday('talked');
+    this._log({ type: 'chat', len: userText.length, present: this.ctx.personPresent, master: this.ctx.isMaster });
     const { text, motion, emotion, ok } = await this._complete(userText);
+    if (ok) this.visitLog = [...this.visitLog, [userText, text]].slice(-10);
     this.act({ text, motion, emotion, source: ok ? 'llm' : 'fallback' });
     this.lastInteraction = this.lastChat = performance.now();
     this.busy = false;
@@ -265,11 +346,11 @@ class RitsuBrain {
   }
 
   /** LiteLLM へ問い合わせて返答の本文を返す。失敗したら null */
-  async _request(messages, temperature) {
+  async _request(messages, temperature, timeoutSec = RITSU_CFG.llmTimeoutSec) {
     try {
       const res = await fetch(`${RITSU_CFG.llmUrl}/v1/chat/completions`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(RITSU_CFG.llmTimeoutSec * 1000),
+        signal: AbortSignal.timeout(timeoutSec * 1000),
         body: JSON.stringify({ model: RITSU_CFG.llmModel, messages, temperature, max_tokens: 96 }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
@@ -283,7 +364,10 @@ class RitsuBrain {
     }
   }
 
-  _systemPrompt() { return `${SYSTEM_PROMPT}\n\n# 今の状況\n${this.ctx.describe()}`; }
+  _systemPrompt() {
+    const mem = this._memoryText();
+    return `${SYSTEM_PROMPT}\n\n# 今の状況\n${this.ctx.describe()}` + (mem ? `\n\n# 覚えていること\n${mem}` : '');
+  }
 
   async _complete(userText) {
     const messages = [{ role: 'system', content: this._systemPrompt() },
@@ -320,7 +404,9 @@ class RitsuBrain {
       setTimeout(() => {
         const quietSec = (performance.now() - this.lastInteraction) / 1000;
         const sincePeek = (performance.now() - this.lastPeek) / 1000;
-        if (!this.busy && quietSec > RITSU_CFG.idleMinSec && sincePeek > 8) {   // のぞき込み直後は控える
+        if (!this.busy && !this.deciding && quietSec > RITSU_CFG.idleMinSec && sincePeek > 8 && this._lingering()) {
+          this._onLinger();
+        } else if (!this.busy && !this.deciding && quietSec > RITSU_CFG.idleMinSec && sincePeek > 8) {   // のぞき込み直後は控える
           const notice = text => this.act({ motion: Math.random() < 0.5 ? 'noticeL' : 'noticeR',
                                             emotion: 'surprised', text, source: 'idle' });
           if (Math.random() < RITSU_CFG.idleSpeakChance) {          // しゃべる
@@ -391,76 +477,363 @@ ${recent}`;
   /** 来た・帰った・近いへの反応をしてよいか(会話中・直前の反応のすぐ後は控える) */
   _canReact() {
     const now = performance.now();
-    if (this.busy || (now - this.lastChat) / 1000 < 15 || (now - this.lastReact) / 1000 < REACT_COOLDOWN) return false;
+    if (this.busy || this.deciding || (now - this.lastChat) / 1000 < 15 || (now - this.lastReact) / 1000 < REACT_COOLDOWN) return false;
     this.lastReact = this.lastInteraction = now;
     return true;
   }
 
-  /** 来訪の挨拶の言葉。ほんの少し見失っただけなら null */
-  _greeting() {
-    if (this.absentSec <= 15) return null;
-    if (this.absentSec < 60) return 'おかえりなさい。';
-    return greetingFor(this.ctx) + (this.ctx.personDistance === 'far' ? 'よかったら、近くへどうぞ。' : '');
+  /** 出来事への反応を LLM に決めさせる(何を言うか・どう動くか・何もしないか)。
+   *  DECIDE_TIMEOUT_SEC までに使える返答が無ければ fallback [motion, emotion, text] を使う。
+   *  考えている間に話しかけられた・人が去ったら null(反応しない)。
+   *  needText: 何か言わせたい(動きだけの返答は使わない) / allowWait: 何もしない選択を許す /
+   *  withHistory: 最近の会話も渡す / reflexMotion: LLM を待たずにすぐ動く(返答ではセリフだけ使う) */
+  async _decide(situation, { motions, fallback, needText = false, allowWait = false, withHistory = false, reflexMotion = null }) {
+    const useFallback = () => {
+      const [motion, emotion, text] = fallback;
+      return { motion: reflexMotion ? null : motion, emotion, text, by: 'template' };
+    };
+    if (!RITSU_CFG.llmReact) return useFallback();
+    const startedChat = this.lastChat;
+    const visit = this.ctx.visit;
+    const forms = ['- 話しかける: [emotion:名前][motion:名前] セリフ(1〜2文、40文字以内)'];
+    if (!needText) forms.push('- 動きだけ(何も言わない): [emotion:名前][motion:名前]');
+    if (allowWait) forms.push('- 何もしない: [wait]');
+    const prompt = `(カメラで見た出来事に、看板娘としてどう反応するか決めてください。まだ話しかけられてはいません)
+出来事: ${situation}
+次のどれか1つの形だけで答える:
+${forms.join('\n')}
+motion は次から選ぶ: ${motions.join(', ')}
+最近言ったこと(同じ言い回しは避ける): ${this.recentLines.slice(-4).join(' / ') || 'なし'}`;
+    this.deciding = true;
+    const reply = await this._request([{ role: 'system', content: this._systemPrompt() },
+                                       ...(withHistory ? this.history.slice(-4) : []),
+                                       { role: 'user', content: prompt }], 0.9, DECIDE_TIMEOUT_SEC);
+    this.deciding = false;
+    if (this.busy || this.lastChat !== startedChat || this.ctx.visit !== visit) return null;
+    const d = reply && parseDecision(reply, motions, allowWait);
+    const norm = t => t.replace(/[\s。、!！?？…]/g, '');
+    const repeated = d && d.text && this.recentLines.some(r => norm(r) === norm(d.text));
+    if (!d || (needText && !d.text) || repeated) {   // 最近と同じセリフも使わない
+      if (reply) console.warn('[brain] invalid decision:', reply);
+      return useFallback();
+    }
+    if (reflexMotion) d.motion = null;       // 動きはもう始めている
+    if (d.text) this.recentLines = [...this.recentLines, d.text].slice(-8);
+    return { ...d, by: 'llm' };
+  }
+
+  /** _decide の結果を演じて記録する */
+  async _react(reaction, situation, opts) {
+    if (opts.reflexMotion) this.act({ motion: opts.reflexMotion, emotion: opts.fallback[1] });
+    const d = await this._decide(situation, opts);
+    if (!d) return;
+    this._log({ type: 'react', reaction, arm: opts.arm || null, by: d.by, act: d.wait ? 'wait' : d.text ? 'say' : 'motion',
+                master: this.ctx.isMaster });
+    if (d.wait) return;
+    this.act({ text: d.text, motion: d.motion, emotion: d.emotion, source: d.by === 'llm' ? 'idle-llm' : 'idle' });
+  }
+
+  /** 人が来た */
+  _onArrive(absentSec) {
+    this.greeted = false;
+    this.absentSec = absentSec;
+    this.visitStart = performance.now();
+    this.visitLog = [];
+    this._waitedId = false;
+    this._bumpToday('visits');
+    if (this.ctx.isMaster) this._seeMaster();
+    this._log({ type: 'arrive', absent: Math.round(absentSec), z: +(this.ctx.personZ || 0).toFixed(2) });
+  }
+
+  /** 顔の見分けが動いているのに、まだ誰か分からない来たばかりの人なら、少し待ってから fn を呼ぶ。
+   *  (マスターなのに知らない人として挨拶してしまわないように) 待つなら true */
+  _waitForId(fn) {
+    const wait = 2.0 - this.ctx.visitSec;
+    if (this._waitedId || !this.ctx.recognizerAlive || this.ctx.isMaster || wait <= 0) return false;
+    this._waitedId = true;
+    setTimeout(fn, wait * 1000);
+    return true;
   }
 
   /** ⑤ 目が合った: まだ挨拶していなければ挨拶(通り過ぎるだけでこちらを見ない人には話しかけない)。
-   *  挨拶済みなら、ときどき「目が合いましたね」 */
+   *  挨拶済みなら、ときどき目が合ったことに反応する */
   _onLook() {
+    if (!this.ctx.visit) return;
     if (!this.greeted) {
-      const text = this._greeting();
-      if (!text) { this.greeted = true; return; }
+      if (this.absentSec <= 15) { this.greeted = true; return; }   // ほんの少し見失っただけ
+      if (this._waitForId(() => this._onLook())) return;
       if (!this._canReact()) return;              // 会話中などは、次に目が合ったときに挨拶する
       this.greeted = true;
-      const far = this.ctx.personDistance === 'far';
-      this.act({ text, motion: far ? 'comeHere' : Math.random() < 0.5 ? 'wave' : 'ojigiKawaii',
-                 emotion: 'happy', source: 'idle' });
+      if (!this.ctx.isMaster) this._bumpToday('looked');
+      this._greet();
       return;
     }
     const now = performance.now();
     if ((now - this.lastEyeContact) / 1000 < 120 || Math.random() > 0.4 || !this._canReact()) return;
     this.lastEyeContact = now;
-    const [motion, emotion, text] = EYE_CONTACT_LINES[Math.floor(Math.random() * EYE_CONTACT_LINES.length)];
-    this.act({ text, motion, emotion, source: 'idle' });
+    this._react('eye', '挨拶したあとの人と、また目が合った', {
+      motions: REACT_MOTIONS, fallback: pick(EYE_CONTACT_LINES), allowWait: true, withHistory: true });
   }
 
-  /** ① こちらを見ながら近づいてきた: 見上げる(まだなら挨拶も)。
+  /** 挨拶。マスターには親しく、それ以外の人には挨拶のやり方を選んで(学習)LLM にセリフを作らせる */
+  _greet() {
+    const far = this.ctx.personDistance === 'far';
+    if (this.ctx.isMaster) {
+      const ms = this.memory.master;
+      const topic = ms && ms.notes.length ? '前に話したこと(覚えていること)に少し触れてもよい。' : '';
+      this._react('greet_master', `マスターが来て、こちらを見た。${this._masterSeenText()}「マスター」と呼びかけて、嬉しそうに挨拶する。${topic}`, {
+        motions: GREET_MOTIONS, needText: true,
+        fallback: [pick(['bigWave', 'happyBounce']), 'excited', pick(['マスター、おかえりなさい。', 'あ、マスター。会えて嬉しいです。'])] });
+      return;
+    }
+    if (this.absentSec < 60) {
+      this.act({ text: 'おかえりなさい。', motion: 'wave', emotion: 'happy', source: 'idle' });
+      return;
+    }
+    const style = this._pickArm('greet', Object.keys(GREET_STYLES));
+    this._trackOutcome('greet', style);
+    this._react('greet', `人が来て、こちらを見た。${far ? '少し離れたところにいる。' : ''}やること: ${GREET_STYLES[style].hint}`, {
+      motions: far ? ['comeHere', ...GREET_MOTIONS] : GREET_MOTIONS, needText: true, arm: style,
+      fallback: GREET_STYLES[style].fallback(this.ctx, far) });
+  }
+
+  /** 来訪の途中でマスターだと分かった: もう挨拶していたら、気づいたことを伝える(挨拶前なら挨拶がマスター向けになる) */
+  _onIdentify() {
+    this._seeMaster();
+    for (const p of this.pending) p.master = true;     // マスターへの反応は学習に入れない
+    if (!this.greeted || this.busy || this.deciding) return;
+    this.lastReact = this.lastInteraction = performance.now();
+    this._react('identify_master', 'さっき知らない人だと思って挨拶した相手が、実はマスター(律を作った人)だと分かった。' +
+                'うれしくて少し驚きながら「マスター」と呼びかける', {
+      motions: ['surprisedJump', 'happyBounce', 'bigWave', 'kyun'], needText: true, reflexMotion: 'surprisedJump',
+      fallback: ['surprisedJump', 'excited', 'あっ、マスターでしたか。来てくれて嬉しいです。'] });
+  }
+
+  /** ① こちらを見ながら近づいてきた: すぐ見上げ(反射)、何を言うかは LLM が決める。
    *  遠くで挨拶した直後に近づいてくることが多いので、挨拶の間隔(REACT_COOLDOWN)は待たない */
   _onApproach() {
     const now = performance.now();
-    if (!this.ctx.lookedWithin(3) || this.busy || (now - this.lastReact) / 1000 < 3) return;
+    if (!this.ctx.lookedWithin(3) || this.busy || this.deciding || (now - this.lastReact) / 1000 < 3) return;
     this.lastReact = this.lastInteraction = now;
-    const text = (!this.greeted && this._greeting()) || APPROACH_LINES[Math.floor(Math.random() * APPROACH_LINES.length)];
+    const greet = !this.greeted;
     this.greeted = true;
-    this.act({ text, motion: 'lookUp', emotion: 'happy', source: 'idle' });
+    const who = this.ctx.isMaster ? 'マスターが' : '目の前の人が';
+    this._react('approach', `${who}こちらを見ながら近づいてきたので、見上げた。${greet ? 'まだ挨拶していない。' : ''}`, {
+      motions: ['lookUp'], needText: true, reflexMotion: 'lookUp',
+      fallback: ['lookUp', 'happy', (greet && greetingFor(this.ctx)) || pick(APPROACH_LINES)] });
+  }
+
+  /** 来てから LINGER_SEC 秒以上たち、こちらを見たことがあり、話しかけてはこない人がいる */
+  _lingering() {
+    const v = this.ctx.visit;
+    return this.ctx.personPresent && v && v.looked && this.greeted && this.ctx.visitSec > LINGER_SEC &&
+           (performance.now() - Math.max(this.lastChat, this.lastLinger)) / 1000 > 20;
+  }
+
+  /** しばらく居てくれる人への声かけ。やり方(動きだけ / 一言 / 質問)を選び(学習)、言葉は LLM が決める */
+  _onLinger() {
+    this.lastLinger = this.lastInteraction = performance.now();
+    const style = this.ctx.isMaster ? pick(['comment', 'question']) : this._pickArm('linger', Object.keys(LINGER_STYLES));
+    this._trackOutcome('linger', style);
+    const st = LINGER_STYLES[style];
+    if (!st.hint) {
+      this.act({ motion: pick(IDLE_MOTIONS_ONLY) });
+      this._log({ type: 'react', reaction: 'linger', arm: style, by: 'template', act: 'motion' });
+      return;
+    }
+    const who = this.ctx.isMaster ? 'マスター' : '目の前の人';
+    this._react('linger', `${who}が${Math.round(this.ctx.visitSec)}秒ほど前からいる(話しかけてはこない)。やること: ${st.hint}`, {
+      motions: IDLE_LLM_MOTIONS, allowWait: true, withHistory: true, arm: style, fallback: st.fallback(this.ctx) });
   }
 
   /** ② 去った: 目が合った・挨拶した・話した・しばらくいた人だけ、去った側を向いて手を振る */
   _onLeave(stayedSec, dir, visit) {
     const talked = this.lastChat > (this.visitStart || 0);
     const engaged = (visit && visit.looked) || this.greeted || talked || stayedSec >= 15;
+    const master = !!(visit && visit.master);
     this.greeted = false;
+    this._log({ type: 'leave', stayed: Math.round(stayedSec), looked: !!(visit && visit.looked), talked, master });
+    if (this.visitLog.length) this._rememberVisit(this.visitLog, master);
+    this.visitLog = [];
+    if (talked) this.history = [];   // 次の人に前の人との会話を引き継がない(要約は覚えている)
     const now = performance.now();
     if (!engaged || this.busy || (now - this.lastReact) / 1000 < 3) return;   // 見送りは挨拶の間隔を待たない
     this.lastReact = this.lastInteraction = now;
     const night = ['night', 'lateNight'].includes(this.ctx.timeOfDay());
-    const text = night ? 'おやすみなさい。またお越しくださいね。'
+    const text = master ? (night ? 'おやすみなさい、マスター。' : pick(['いってらっしゃい、マスター。', 'マスター、また来てくださいね。']))
+               : night ? 'おやすみなさい。またお越しくださいね。'
                : SEE_OFF_LINES[Math.floor(Math.random() * SEE_OFF_LINES.length)];
     this.act({ text, motion: dir > 0 ? 'seeOffR' : dir < 0 ? 'seeOffL' : 'byebye', emotion: 'happy', source: 'idle' });
   }
 
   /** ③ 画面のすぐ前に手: 内側から同じ側に手を合わせる */
-  _onTouch(dir) {
+  _onTouch(dir, hand) {
     const now = performance.now();
     if (this.busy || (now - this.lastTouch) / 1000 < TOUCH_COOLDOWN) return;
     this.lastTouch = this.lastReact = this.lastInteraction = now;
     this.act({ text: TOUCH_LINES[Math.floor(Math.random() * TOUCH_LINES.length)],
-               motion: dir > 0 ? 'glassTouchR' : 'glassTouchL', emotion: 'happy', source: 'idle' });
+               motion: dir > 0 ? 'glassTouchR' : 'glassTouchL', emotion: 'happy', source: 'idle', hand });
   }
 
   _onNear() {
     if (!this._canReact()) return;
-    this.act({ text: NEAR_LINES[Math.floor(Math.random() * NEAR_LINES.length)],
-               motion: 'mojimoji', emotion: 'shy', source: 'idle' });
+    this._react('near', `${this.ctx.isMaster ? 'マスター' : '目の前の人'}が画面のすぐ近くまで来た`, {
+      motions: ['mojimoji'], needText: true, reflexMotion: 'mojimoji', fallback: ['mojimoji', 'shy', pick(NEAR_LINES)] });
+  }
+
+  /* ================= 反応の学習 ================= */
+
+  /** 反応のやり方を選ぶ。どれも LEARN_MIN_TRIALS 回試すまでは試した回数の少ないもの、
+   *  それ以降は LEARN_EXPLORE の確率でどれか、それ以外は結果の平均が一番よいもの */
+  _pickArm(reaction, arms) {
+    if (!RITSU_CFG.learn) return pick(arms);
+    const st = this.stats[reaction] || {};
+    const n = a => (st[a] ? st[a][0] : 0);
+    const fresh = arms.filter(a => n(a) < LEARN_MIN_TRIALS);
+    if (fresh.length) return pick(fresh.filter(a => n(a) === Math.min(...fresh.map(n))));
+    if (Math.random() < LEARN_EXPLORE) return pick(arms);
+    const mean = a => st[a][1] / st[a][0];
+    return arms.reduce((best, a) => (mean(a) > mean(best) ? a : best));
+  }
+
+  /** 反応の結果(話しかけてくれたか・居てくれた時間)を OUTCOME_SEC 秒まで見守る。マスターへの反応は数えない */
+  _trackOutcome(reaction, arm) {
+    if (!this.ctx.personPresent || this.ctx.isMaster) return;
+    this.pending.push({ reaction, arm, at: performance.now(), visit: this.ctx.visit && this.ctx.visit.id });
+  }
+
+  _settleOutcomes() {
+    const now = performance.now();
+    this.pending = this.pending.filter(p => {
+      const talked = this.lastChat > p.at;
+      const gone = !this.ctx.visit || this.ctx.visit.id !== p.visit;
+      if (!talked && !gone && now - p.at < OUTCOME_SEC * 1000) return true;
+      if (p.master || (!gone && this.ctx.visit.master)) return false;
+      const stay = Math.max(0, Math.min(OUTCOME_SEC, (this.ctx.personLastSeen - p.at) / 1000));
+      const reward = talked ? 1 : +(0.6 * stay / OUTCOME_SEC).toFixed(3);
+      const arms = (this.stats[p.reaction] = this.stats[p.reaction] || {});
+      const [n, total] = arms[p.arm] || [0, 0];
+      arms[p.arm] = [n + 1, total + reward];
+      this._log({ type: 'outcome', reaction: p.reaction, arm: p.arm, reward, talked, stay: Math.round(stay) });
+      return false;
+    });
+  }
+
+  _log(obj) { if (this.persist) this.persist.log(obj); }
+
+  /* ================= 記憶 ================= */
+
+  /** memory ノードから届いた記憶(/ritsu/memory)。最初の1回だけ読み込み、それ以降は自分の記憶を正とする */
+  onMemory(m) {
+    if (m.stats) this.stats = this._mergeStats(m.stats);
+    if (this.memoryLoaded) return;
+    this.memoryLoaded = true;
+    const local = this.memory;
+    this.memory = { today: m.today || null, master: m.master || null };
+    // 届く前に覚えたこと(起動直後の来訪など)を足す
+    if (local.today) {
+      const t = this._today();
+      for (const k of ['visits', 'looked', 'talked']) t[k] += local.today[k] || 0;
+      t.notes = [...t.notes, ...local.today.notes].slice(-TODAY_NOTES_MAX);
+      t.master = t.master || local.today.master;
+      this._put('today');
+    }
+    if (local.master) {
+      const ms = this._master();
+      ms.notes = [...ms.notes, ...local.master.notes].slice(-MASTER_NOTES_MAX);
+      ms.lastSeen = local.master.lastSeen || ms.lastSeen;
+      this._put('master');
+    }
+  }
+
+  /** 保存された結果に、まだ保存に反映されていない(届いた後の)分は無いので、そのまま使う。
+   *  ただし memory ノードが無い間に数えた分は手元のものを残す */
+  _mergeStats(saved) {
+    const out = JSON.parse(JSON.stringify(saved));
+    for (const [r, arms] of Object.entries(this.stats))
+      for (const [a, v] of Object.entries(arms))
+        if (!out[r] || !out[r][a] || out[r][a][0] < v[0]) (out[r] = out[r] || {})[a] = v;
+    return out;
+  }
+
+  _put(key) { if (this.persist && this.memoryLoaded) this.persist.put(key, this.memory[key]); }
+
+  /** 今日の記憶(日付が変わったら新しくする) */
+  _today() {
+    const d = new Date();
+    const date = `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+    if (!this.memory.today || this.memory.today.date !== date)
+      this.memory.today = { date, visits: 0, looked: 0, talked: 0, master: false, notes: [] };
+    return this.memory.today;
+  }
+
+  _master() {
+    if (!this.memory.master) this.memory.master = { lastSeen: null, notes: [] };
+    return this.memory.master;
+  }
+
+  _bumpToday(key) { this._today()[key]++; this._put('today'); }
+
+  /** マスターに会った(今日会ったことと、前回会った日を覚える) */
+  _seeMaster() {
+    const t = this._today();
+    const ms = this._master();
+    this._prevMasterSeen = ms.lastSeen;
+    t.master = true;
+    ms.lastSeen = Date.now();
+    this._put('today');
+    this._put('master');
+  }
+
+  /** 前回マスターに会ったのはいつか(挨拶に使う) */
+  _masterSeenText() {
+    const last = this._prevMasterSeen;
+    if (!last) return '';
+    const days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(last).setHours(0, 0, 0, 0)) / 86400000);
+    if (days <= 0) return '今日はさっきも会った。';
+    if (days === 1) return '前に会ったのは昨日。';
+    return `前に会ったのは${days}日前(久しぶり)。`;
+  }
+
+  /** システムプロンプトに入れる「覚えていること」 */
+  _memoryText() {
+    const lines = [];
+    const t = this.memory.today;
+    const d = new Date();
+    if (t && t.date === `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`) {
+      lines.push(`今日: 来た人 ${t.visits}人、目が合って挨拶した人 ${t.looked}人、話しかけてくれた人 ${t.talked}人` +
+                 (t.master ? '。マスターにも会った' : ''));
+      // ほかの人との会話はマスターにだけ話してよい(それ以外の人には「今日の様子」だけ)
+      if (t.notes.length && this.ctx.isMaster) lines.push(`今日ほかの人と話したこと: ${t.notes.slice(-4).join(' / ')}`);
+    }
+    const ms = this.memory.master;
+    if (this.ctx.isMaster && ms && ms.notes.length) {
+      lines.push('マスターと前に話したこと: ' + ms.notes.slice(-5).map(n => `${n.date} ${n.text}`).join(' / '));
+    }
+    return lines.join('\n');
+  }
+
+  /** 去った人との会話を、律の日記として1文にまとめて覚える(マスターとの会話はマスターの記憶にも) */
+  async _rememberVisit(log, master) {
+    const transcript = log.map(([u, r]) => `相手: ${u}\n律: ${r}`).join('\n');
+    const reply = await this._request([
+      { role: 'system', content: 'あなたは会話を短く要約する係です。日本語で、本文だけを書きます。' },
+      { role: 'user', content: `次は看板娘の律と${master ? 'マスター' : 'お客さん'}の会話です。` +
+        '相手が話したこと・好み・予定を、事実だけ1文・40文字以内で書いてください。律の感想や相づちは入れない。' +
+        `例: 猫カフェに行ってきた。猫が好き。\n\n${transcript}` }], 0.3);
+    const text = reply && cleanText(reply);
+    if (!text) return;
+    const d = new Date();
+    const short = text.slice(0, 60);
+    if (!master) {      // マスターとの会話はマスターの記憶にだけ入れる
+      const t = this._today();
+      t.notes = [...t.notes, `${d.getHours()}時 ${short}`].slice(-TODAY_NOTES_MAX);
+      this._put('today');
+    } else {
+      const ms = this._master();
+      ms.notes = [...ms.notes, { date: `${d.getMonth() + 1}月${d.getDate()}日`, text: short }].slice(-MASTER_NOTES_MAX);
+      this._put('master');
+    }
   }
 
   /** 会話が無い間、peekMinSec〜peekMaxSec 秒に1回のぞき込む(話しかけられたら数え直し) */

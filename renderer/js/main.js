@@ -9,7 +9,12 @@
  *   購読 /ritsu/camera_alive   std_msgs/Bool    人検出の生存通知(2秒ごと。CAMERAランプ)
  *   購読 /ritsu/tilt           geometry_msgs/Vector3  カメラの傾き[度] x=roll。左右に大きく傾くと「おっとっと」
  *   購読 /ritsu/looking        std_msgs/Bool    顔がこちらを向いているか (挨拶は目が合った人にだけ)
- *   購読 /ritsu/hand_near      geometry_msgs/PointStamped  画面のすぐ前の手 (内側から手を合わせる)
+ *   購読 /ritsu/hand_near      geometry_msgs/PointStamped  画面のすぐ前の手 (内側から、手のある位置へ手を合わせる)
+ *   購読 /ritsu/person_id      std_msgs/String  JSON {"id":"master"|""} 顔で見分けた相手 (マスターと呼ぶ)
+ *   購読 /ritsu/memory         std_msgs/String  JSON 保存された記憶と反応の結果 (ritsu_memory.py)
+ *   発行 /ritsu/memory_put     std_msgs/String  JSON {"key","value"} 覚えたことを保存 (kioskのみ)
+ *   発行 /ritsu/log            std_msgs/String  JSON 来訪・反応・その結果の記録 (kioskのみ)
+ *   発行 /ritsu/enroll         std_msgs/String  JSON {"action":"add"|"clear"} マスターの顔の登録 (RITSU.enroll())
  *   発行 /ritsu/say            std_msgs/String  JSON {"text":"...","emotion":"happy","motion":"wave","source":"llm|fallback|idle|idle-llm"}
  *   発行 /ritsu/thinking       std_msgs/Bool    返事を考え中
  * =========================================================================
@@ -221,16 +226,53 @@
     lampCam.classList.toggle('idle', alive && !person);
   }, 500);
 
+  /* ===== 相手に合わせた姿勢 =====
+   * 目は視線追従で、首は vrm_avatar.js が目に合わせて相手を追う。その下で体も少し相手へ向け、
+   * すぐ目の前の人には少しのけぞり、離れたところからこちらを見ている人には少し身を乗り出す。
+   * 基準ポーズを動かすので、モーションはその上に重なる */
+  const ATTEND_YAW = 0.12;      // 相手の左右(視線と同じ -1..1)に対する体の向き [rad]
+  const ATTEND_BACK = 0.05;     // 近い人に、のけぞる量 [rad]
+  const ATTEND_LEAN = -0.06;    // 遠くでこちらを見ている人に、身を乗り出す量 [rad]
+  function stepAttention(dt) {
+    const base = mochiko._base;
+    let yaw = 0, pitch = 0;
+    if (ctx.personPresent) {
+      yaw = THREE.MathUtils.clamp(-ctx.personXn * 2.2, -1, 1) * ATTEND_YAW;   // 視線追従と同じ向き(カメラの右 = 画面の左)
+      const d = ctx.personDistance;
+      pitch = d === 'near' ? ATTEND_BACK : d === 'far' && ctx.looking ? ATTEND_LEAN : 0;
+    }
+    const k = Math.min(1, dt * 1.5);
+    base.bodyYaw += (yaw - base.bodyYaw) * k;
+    base.bodyPitch += (pitch - base.bodyPitch) * k;
+  }
+
+  /* ===== 手を合わせる位置 =====
+   * 画面のすぐ前の手の位置(カメラから見た向き x/z, y/z)に合わせて、腕を上げる高さと開き具合、カメラの寄り先を変える */
+  const TOUCH_Y0 = 0.4;         // この高さ(y/z、下が+)の手には、モーションそのままの高さで手を合わせる
+  function touchAdjust(motion, hand) {
+    if (!hand) return { adjust: null, side: motion === 'glassTouchR' ? 0.12 : -0.12 };
+    const clamp = THREE.MathUtils.clamp;
+    const up = clamp((TOUCH_Y0 - hand.yn) * 0.8, -0.4, 0.25);             // 高い手ほど腕を上げる
+    const out = clamp((Math.abs(hand.xn) - 0.3) * 0.8, -0.2, 0.3);       // 端の手ほど腕を開く
+    const sign = motion === 'glassTouchR' ? 1 : -1;
+    const adjust = sign > 0 ? { shoulderLx: up, shoulderLz: out } : { shoulderRx: up, shoulderRz: -out };
+    return { adjust, side: sign * (0.06 + clamp(Math.abs(hand.xn), 0, 0.6) * 0.15) };
+  }
+
   /* ===== 会話 & 暇つぶし ===== */
   const lampLlm = document.getElementById('lamp-llm');
   const ctx = new RitsuContext({ weather: RITSU_CFG.weather });   // 日時・季節・天気・カメラ前の人など、会話に使う今の状況
   const brain = new RitsuBrain({
     ctx,
-    act({ text, motion, emotion, source }) {
+    // 記憶と反応の記録は kiosk 画面だけが memory ノードへ送る(デバッグで開いた画面が書き換えないように)
+    persist: RITSU_CFG.kiosk && ros ? { put: (key, value) => pubJson('/ritsu/memory_put', { key, value }),
+                                        log: obj => pubJson('/ritsu/log', obj) } : null,
+    act({ text, motion, emotion, source, hand }) {
       if (emotion) setEmotionFor(emotion, motion, text);
-      if (motion) player.play(motion);
+      const touch = motion === 'glassTouchL' || motion === 'glassTouchR' ? touchAdjust(motion, hand) : null;
+      if (motion) player.play(motion, touch && touch.adjust);
       if (motion === 'peek') startPeek(0.62);
-      if (motion === 'glassTouchL' || motion === 'glassTouchR') startPeek(1.15, motion === 'glassTouchR' ? 0.12 : -0.12);
+      if (touch) startPeek(1.15, touch.side);
       if (motion === 'noticeL' || motion === 'noticeR') startPan(motion === 'noticeR' ? 1 : -1);
       if (motion === 'seeOffL' || motion === 'seeOffR') startPan(motion === 'seeOffR' ? 1 : -1);
       if (text) {
@@ -256,7 +298,13 @@
     ros.sub('/ritsu/camera_alive', 'std_msgs/Bool', () => { camSeenAt = performance.now(); });
     ros.sub('/ritsu/looking', 'std_msgs/Bool', m => ctx.onLooking(m.data));
     ros.sub('/ritsu/hand_near', 'geometry_msgs/PointStamped', m => {
-      if (m.point.z > 0) ctx.onHand(m.point.x / m.point.z);
+      if (m.point.z > 0) ctx.onHand(m.point.x / m.point.z, m.point.y / m.point.z);
+    });
+    ros.sub('/ritsu/person_id', 'std_msgs/String', m => {
+      try { ctx.onIdentity(JSON.parse(m.data).id); } catch { /* 壊れた通知は無視 */ }
+    });
+    ros.sub('/ritsu/memory', 'std_msgs/String', m => {
+      try { brain.onMemory(JSON.parse(m.data)); } catch (e) { console.warn('[main] memory:', e); }
     });
     ros.sub('/ritsu/person', 'geometry_msgs/PointStamped', m => {
       camSeenAt = personSeenAt = performance.now();
@@ -302,6 +350,7 @@
     mochiko.p.mouthOpen += (visemeA - mochiko.p.mouthOpen) * Math.min(1, dt * 14);
     visemeA *= 1 - Math.min(1, dt * 3);
 
+    stepAttention(dt);
     player.step(dt);
     mochiko.update(dt, gaze);
     stepCamera(dt, now);
@@ -334,7 +383,11 @@
     // カメラ無しで人の検出を試す: RITSU.person(1.2) を1秒ごとに数回呼ぶ(止めると8秒後に「帰った」扱い)
     person: (z = 1.2, xn = 0) => ctx.onPerson(z, xn),
     look: (on = true) => ctx.onLooking(on),     // 目が合ったことにする
-    hand: (xn = 0.3) => ctx.onHand(xn),         // 画面のすぐ前に手が来たことにする(xn>0 はカメラから見て右=画面の左)
+    hand: (xn = 0.3, yn = 0.4) => ctx.onHand(xn, yn),   // 画面のすぐ前に手が来たことにする(xn>0 はカメラから見て右=画面の左)
+    master: (on = true) => ctx.onIdentity(on ? 'master' : ''),   // 目の前の人をマスターということにする
+    // マスターの顔を登録する(カメラの正面で約4秒じっとする)/ 消す。結果は /ritsu/enroll_status
+    enroll: (action = 'add') => pubJson('/ritsu/enroll', { action }),
+    memory: () => ({ ...brain.memory, stats: brain.stats }),
     act: motion => brain.act({ motion }),
   };
 })();

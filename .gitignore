@@ -3,3 +3,5 @@
 __pycache__/
 *.pyc
 renderer/debug/
+# 律の記憶・反応の記録・登録した顔の特徴(UNO Q の中だけに置く)
+data/

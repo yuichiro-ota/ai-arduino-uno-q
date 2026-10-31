@@ -471,10 +471,13 @@ class MotionPlayer {
 
   list() { return Object.keys(MOTIONS); }
 
-  play(name) {
+  /** adjust: { パラメータ: 足す量 } — 相手に合わせてモーションを少し変える(手を伸ばす高さなど)。
+   *  モーションのトラックにあるパラメータだけ。入り 20%・抜け 22% でなめらかに足す */
+  play(name, adjust = null) {
     const m = MOTIONS[name];
     if (!m) { console.warn('unknown motion:', name); return false; }
     this.current = m;
+    this.adjust = adjust;
     this.t = 0;
     // 現在値からの相対再生ではなく、基準ポーズ上で加算合成する
     return true;
@@ -519,6 +522,11 @@ class MotionPlayer {
       } else {
         this.ch.p[param] = base[param] + v; // ポーズ系は基準+オフセット
       }
+    }
+    if (this.adjust) {
+      const k = u < 0.2 ? ease(u / 0.2) : u < 0.78 ? 1 : 1 - ease((u - 0.78) / 0.22);
+      for (const [param, d] of Object.entries(this.adjust))
+        if (this.current.tracks[param]) this.ch.p[param] += d * k;
     }
   }
 }

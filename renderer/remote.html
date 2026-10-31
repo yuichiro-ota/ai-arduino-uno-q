@@ -32,6 +32,18 @@
   #conn { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
   #conn .dot { width: 9px; height: 9px; border-radius: 50%; background: #ccc; }
   #conn.on .dot { background: #57d9a3; box-shadow: 0 0 6px #57d9a3; }
+  header .right { display: flex; align-items: center; gap: 12px; }
+  #master-btn { border: 1px solid var(--sakura); background: #fff; color: var(--ink); border-radius: 999px;
+                padding: 4px 10px; font-size: 12px; }
+
+  /* マスターの顔の登録 */
+  #master { display: none; padding: 12px 16px; background: #fff; border-bottom: 1px solid #f3e1e6; font-size: 14px; line-height: 1.6; }
+  #master.show { display: block; }
+  #master .row { display: flex; gap: 8px; margin-top: 8px; }
+  #master button { flex: 1; padding: 10px; border-radius: 999px; border: none; font-size: 14px; font-weight: 700; }
+  #enroll-add { background: var(--accent); color: #fff; }
+  #enroll-clear { background: #f3e1e6; color: var(--ink); }
+  #enroll-state { margin-top: 6px; color: var(--muted); font-size: 13px; min-height: 1.6em; }
 
   #log {
     flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px;
@@ -74,8 +86,21 @@
 <body>
 <header>
   <h1>律と話す</h1>
-  <div id="conn"><div class="dot"></div><span id="conn-text">接続中…</span></div>
+  <div class="right">
+    <button id="master-btn" type="button">マスター登録</button>
+    <div id="conn"><div class="dot"></div><span id="conn-text">接続中…</span></div>
+  </div>
 </header>
+
+<section id="master">
+  カメラの正面に立ち、顔をカメラに向けたまま「登録」を押して約4秒じっとしてください。
+  明るさや向きを変えて何回か登録すると、見分けやすくなります。顔の画像は保存せず、見分けるための数値だけを律の本体に保存します。
+  <div class="row">
+    <button id="enroll-add" type="button">登録</button>
+    <button id="enroll-clear" type="button">登録を消す</button>
+  </div>
+  <div id="enroll-state"></div>
+</section>
 
 <main id="log">
   <div class="empty" id="empty">話しかけると、画面の律が答えます。</div>
@@ -137,6 +162,24 @@
   ros.sub('/ritsu/thinking', 'std_msgs/Bool', m => {
     thinking.classList.toggle('show', !!m.data);
     log.scrollTop = log.scrollHeight;
+  });
+
+  // マスターの顔の登録(カメラのノードが /ritsu/enroll を受けて、結果を /ritsu/enroll_status で返す)
+  const masterPanel = document.getElementById('master');
+  const enrollState = document.getElementById('enroll-state');
+  const enroll = action => {
+    if (ros.pub('/ritsu/enroll', 'std_msgs/String', { data: JSON.stringify({ action }) })) enrollState.textContent = '送信しました…';
+    else enrollState.textContent = 'つながっていません';
+  };
+  document.getElementById('master-btn').addEventListener('click', () => masterPanel.classList.toggle('show'));
+  document.getElementById('enroll-add').addEventListener('click', () => enroll('add'));
+  document.getElementById('enroll-clear').addEventListener('click', () => {
+    if (confirm('登録したマスターの顔を消しますか?')) enroll('clear');
+  });
+  ros.sub('/ritsu/enroll_status', 'std_msgs/String', m => {
+    const st = parse(m.data);
+    enrollState.textContent = { capturing: `撮影中… ${st.count}枚`, done: `登録しました(全部で${st.count}枚分)`,
+                                failed: '顔が見つかりませんでした。カメラの正面で、もう一度どうぞ', cleared: '登録を消しました' }[st.state] || '';
   });
 
   document.getElementById('form').addEventListener('submit', e => {

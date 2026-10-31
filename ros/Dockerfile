@@ -14,5 +14,7 @@ RUN pip install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
 WORKDIR /app
 # 顔検出モデル YuNet (OpenCV Zoo, MIT License, 約230KB)
 ADD https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx models/yunet.onnx
-COPY ritsu_perception.py .
+# 顔の見分け(マスターの顔) SFace (OpenCV Zoo, Apache 2.0, 約37MB)
+ADD https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx models/sface.onnx
+COPY ritsu_perception.py ritsu_memory.py ./
 ENV PYTHONUNBUFFERED=1

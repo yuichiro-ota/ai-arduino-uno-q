@@ -105,8 +105,11 @@ class RitsuContext {
     this.personSince = null;        // 今回見え始めた時刻(いなくなったら null)
     this.looking = false;           // 顔がこちらを向いているか (/ritsu/looking)
     this.lookedAt = -Infinity;      // 最後にこちらを向いた時刻
-    this.visit = null;              // 今回の来訪 { looked, approached }
-    this.listeners = { arrive: [], leave: [], near: [], look: [], approach: [], touch: [] };
+    this.visit = null;              // 今回の来訪 { id, looked, approached, master }
+    this.visitCount = 0;
+    this.identity = '';             // 顔で見分けた相手 'master' | '' (/ritsu/person_id)
+    this.idSeenAt = -Infinity;      // 最後に /ritsu/person_id が届いた時刻(顔の見分けが動いているか)
+    this.listeners = { arrive: [], leave: [], near: [], look: [], approach: [], touch: [], identify: [] };
     this._nearNotified = false;
     this._track = [];               // 直近の [時刻, z, xn] (近づく速さ・去った方向用)
     this._handSince = null;         // 画面のすぐ前に手が来た時刻
@@ -129,7 +132,7 @@ class RitsuContext {
     if (this.personSince === null) {
       this.personSince = now;
       this._nearNotified = false;
-      this.visit = { looked: false, approached: false };
+      this.visit = { id: ++this.visitCount, looked: false, approached: false, master: this.identity === 'master' };
       this._track = [[now, z, xn]];
       this._emit('arrive', absent / 1000);   // 前回いなくなってからの秒数
       if (this.looking) this._onLookStart();
@@ -167,14 +170,29 @@ class RitsuContext {
   /** 直近 sec 秒以内にこちらを向いたか */
   lookedWithin(sec) { return this.looking || performance.now() - this.lookedAt < sec * 1000; }
 
-  /** ③ 画面のすぐ前の手 (/ritsu/hand_near から呼ばれる)。xn = x/z。0.3秒続いたら1回だけ知らせる */
-  onHand(xn) {
+  /** 顔で見分けた相手 (/ritsu/person_id から呼ばれる)。来訪中に初めてマスターと分かったら知らせる */
+  onIdentity(id) {
+    this.idSeenAt = performance.now();
+    this.identity = id === 'master' ? 'master' : '';
+    if (this.identity && this.visit && !this.visit.master) {
+      this.visit.master = true;
+      this._emit('identify', this.identity);
+    }
+  }
+  /** 顔の見分けが動いているか(マスターの顔が登録されていて、カメラのノードから通知が来ている) */
+  get recognizerAlive() { return performance.now() - this.idSeenAt < 5000; }
+  /** 目の前の人がマスターか */
+  get isMaster() { return this.personPresent && this.identity === 'master'; }
+
+  /** ③ 画面のすぐ前の手 (/ritsu/hand_near から呼ばれる)。xn = x/z, yn = y/z(下が+)。
+   *  0.3秒続いたら1回だけ、画面上の左右と手の位置を知らせる */
+  onHand(xn, yn = 0) {
     const now = performance.now();
     if (now - this._handLast > 600) this._handSince = now;     // 途切れたら数え直し
     this._handLast = now;
     if (this._handSince !== null && now - this._handSince > 300) {
       this._handSince = null;                                   // 手を離すまで次は知らせない
-      this._emit('touch', xn > 0 ? -1 : 1);                     // 画面上の左右(カメラの右 = 画面の左)
+      this._emit('touch', xn > 0 ? -1 : 1, { xn, yn });         // 画面上の左右(カメラの右 = 画面の左)
     }
   }
 
@@ -311,7 +329,8 @@ class RitsuContext {
       const DIST = { near: 'すぐ目の前(とても近い)', mid: '話しやすい距離', far: '少し離れたところ' };
       const sec = Math.round((performance.now() - this.personSince) / 1000);
       const stay = sec < 10 ? '今来たところで' : sec < 60 ? `${sec}秒前から` : `${Math.round(sec / 60)}分前から`;
-      lines.push(`目の前の人: ${DIST[this.personDistance]}(約${this.personZ.toFixed(1)}m)にいる。${stay}見えている。` +
+      const who = this.identity === 'master' ? 'マスター(律を作った人。顔で本人と分かった)が' : '';
+      lines.push(`目の前の人: ${who}${DIST[this.personDistance]}(約${this.personZ.toFixed(1)}m)にいる。${stay}見えている。` +
                  (this.looking ? '今こちらを見ている' : 'こちらは見ていない'));
     } else {
       lines.push('目の前の人: カメラには誰も映っていない(画面の向こうから話しかけられている)');

@@ -6,8 +6,8 @@ VRMモデル「律」を Arduino UNO Q の画面に表示し、会話・視線�
 ```
                      UNO Q (192.168.3.80)                                   CT201 (192.168.3.16)
 iPhone ─/remote─▶ nginx:8080 ─ /llm/* (+APIキー) ───────────────────▶ LiteLLM :4000 ─▶ Ollama
-(Safari)            └ /rosbridge ─▶ rosbridge :9090 ◀──ROS 2──▶ ritsu_perception (深度カメラ Gemini 335)
-                                        ▲
+(Safari)            └ /rosbridge ─▶ rosbridge :9090 ◀──ROS 2──▶ ritsu_perception (深度カメラ Gemini 335・顔の見分け)
+                                        ▲             ◀──ROS 2──▶ ritsu_memory (記憶・反応の記録 → ./data)
                          Chromium(kiosk) = 画面の律
 ```
 
@@ -19,7 +19,12 @@ iPhone ─/remote─▶ nginx:8080 ─ /llm/* (+APIキー) ───────
 - **目が合った人にだけ挨拶する**: 顔の向き（目と鼻の位置）からこちらを見ているかを判定し、通り過ぎるだけの人には話しかけない
 - **近づいてくる人を見上げる**: こちらを見ながら近づいてくると、顔を上げて「わぁ」と迎える
 - **去っていく人を見送る**: 画面の端から去ったらその側を向いて手を振る（目が合った・挨拶した・話した・しばらくいた人だけ）
-- **ガラスに手**: 画面のすぐ前（45cm以内）に手を出すと、律も内側から同じ側に手を合わせる
+- **ガラスに手**: 画面のすぐ前（45cm以内）に手を出すと、律も内側から、手のある高さ・位置に合わせて手を合わせる
+- **相手に合わせた姿勢**: 人がいる間は体も少し相手へ向け、すぐ目の前の人には少しのけぞり、離れたところからこちらを見ている人には身を乗り出す
+- **マスターの顔を覚える**: 入力ページの「マスター登録」で顔を登録すると（OpenCV SFace。顔の画像は保存せず、見分けるための数値だけを UNO Q の `data/faces/` に保存）、その人を「マスター」と呼んで親しく話す。知らない人として挨拶したあとで気づいたら「あっ、マスターでしたか」
+- **LLM が反応を決める**: 来た・目が合った・近づいた・しばらく居てくれる人への反応は、LLM が今の状況と記憶を見て「何を言うか・どう動くか・何もしないか」を決める（4秒以内に答えが無ければ用意したセリフ）。手を合わせる・見送る・見上げる・よろけるなどの体の反応は待たずにすぐ動く
+- **記憶**（`ros/ritsu_memory.py`）: 今日来た人・目が合った人・話してくれた人の数、話した人との会話の要約（LLM が1文にまとめる）、マスターとの会話の要約と前回会った日を `data/memory.json` に残し、会話に使う。ほかの人やマスターとの会話の中身は、マスター以外には話さない。次の人に前の人との会話は引き継がない
+- **反応の学習**: 挨拶（短く / 話しかけてと誘う / 質問する）と、しばらく居てくれる人への声かけ（動きだけ / 一言 / 質問）のやり方ごとに、そのあと30秒のうちに話しかけてくれたか・どれだけ居てくれたかを記録し（`data/log/日付.jsonl`）、結果のよいやり方を多めに選ぶ（2割は試しに別のやり方）。マスターへの反応は数えない。`docker logs ritsu-memory` で10分ごとに集計が出る
 - 会話が無いと1〜2分に1回カメラが目元まで寄ってのぞき込む、話しかけると胸から上へ寄る、物音に振り向く
 - 一定間隔で独り言やダンスをする暇つぶし行動
 - **今の状況に合わせた会話**（`renderer/js/context.js`）: 日時・時間帯・季節・平日/土日/祝日（振替休日を含む）・季節の行事・天気（Open-Meteo、`config.js` の `weather` で場所を設定）・カメラ前の人の距離を LLM に渡し、会話が無い間は約20秒に1回しゃべり、そのうち約30秒に1回は LLM が状況から毎回違う独り言を作る（`config.js` の `idleMinSec` / `idleMaxSec` / `idleSpeakChance` / `llmIdleChance`）。残りは状況に合わせて用意したセリフから選ぶ。人が来たら時間帯に合った挨拶、帰ったらお見送り、とても近いと照れる
@@ -30,17 +35,19 @@ iPhone ─/remote─▶ nginx:8080 ─ /llm/* (+APIキー) ───────
 
 | パス | 内容 |
 |---|---|
-| `docker-compose.yml` | `renderer`（nginx）、`rosbridge`、`perception`（人検出）。ROS 2 の2つはホストネットワーク + `ipc: host` |
+| `docker-compose.yml` | `renderer`（nginx）、`rosbridge`、`perception`（人検出）、`memory`（記憶・反応の記録）。ROS 2 の3つはホストネットワーク + `ipc: host` |
 | `.env` | **LiteLLM の接続先とAPIキー**（`.env.example` からコピー。配信されない場所にある） |
 | `nginx/default.conf.template` | 起動時に `.env` の値を埋め込む nginx 設定。`/llm/` を LiteLLM に中継してキーを付ける。`/rosbridge` を rosbridge に中継、`/remote` で入力ページを返す |
-| `ros/Dockerfile` | ROS 2 Jazzy のイメージ（rosbridge、Orbbec SDK、OpenCV、顔検出モデル YuNet） |
-| `ros/ritsu_perception.py` | 人検出・傾きの ROS 2 ノード |
+| `ros/Dockerfile` | ROS 2 Jazzy のイメージ（rosbridge、Orbbec SDK、OpenCV、顔検出モデル YuNet、顔の見分けモデル SFace） |
+| `ros/ritsu_perception.py` | 人検出・傾き・マスターの顔の見分けの ROS 2 ノード |
+| `ros/ritsu_memory.py` | 記憶（`data/memory.json`）と反応の記録（`data/log/`）の ROS 2 ノード |
+| `data/` | 記憶・反応の記録・登録した顔の数値（UNO Q の中だけ。Git の管理外） |
 | `renderer/config.js` | モデル名（`chat` / `chat-large`）、タイムアウト、暇つぶし・のぞき込みの間隔、描画の重さ |
 | `renderer/index.html` | 画面（three.js / three-vrm / roslib.js は jsdelivr CDN から読み込み） |
 | `renderer/remote.html` | iPhone などから話しかける入力ページ |
 | `renderer/js/ros.js` | rosbridge への接続（自動再接続・購読のやり直し） |
 | `renderer/js/context.js` | 今の状況（日時・季節・祝日・カメラ前の人） |
-| `renderer/js/brain.js` | LLM 呼び出し、返答の検証、状況に合わせた独り言・挨拶 |
+| `renderer/js/brain.js` | LLM 呼び出し、返答の検証、状況に合わせた独り言・挨拶、LLM が決める反応、記憶、反応の学習 |
 | `renderer/js/main.js` | シーン、カメラワーク、吹き出し、口パク、チャット UI、ROS 2 連携 |
 | `renderer/js/vrm_avatar.js` / `character.js` / `motions.js` | VRM 制御、内蔵モデル、モーション定義 |
 | `kiosk/ritsu-kiosk.sh` | キオスク表示の起動スクリプト |
@@ -129,6 +136,12 @@ sudo reboot
 | `/ritsu/hand_near` | `geometry_msgs/PointStamped` | 人検出 → 画面の律 | 画面のすぐ前（`TOUCH_DIST` 以内）の手の位置 [m]、光学座標系。ある間は毎回 |
 | `/ritsu/tilt` | `geometry_msgs/Vector3` | 人検出 → 画面の律 | カメラの傾き [度]。x=roll（左右）、y=pitch（前後）。起動時を0度。左右15度以上で「おっとっと」（8度未満に戻るまで再発動しない） |
 | `/camera/imu` | `sensor_msgs/Imu` | 人検出 → | 加速度の生データ（`linear_acceleration` のみ） |
+| `/ritsu/person_id` | `std_msgs/String` | 人検出 → 画面の律 | JSON `{"id":"master"または"","score":0.52}` 顔で見分けた相手。変化したとき＋2秒ごと（顔を登録していないときは送らない） |
+| `/ritsu/enroll` | `std_msgs/String` | 入力ページ → 人検出 | JSON `{"action":"add"}` でマスターの顔を登録（約4秒で6枚）、`{"action":"clear"}` で消す |
+| `/ritsu/enroll_status` | `std_msgs/String` | 人検出 → 入力ページ | JSON `{"state":"capturing/done/failed/cleared","count":n}` |
+| `/ritsu/memory` | `std_msgs/String` | 記憶 → 画面の律 | JSON 覚えていること `today` / `master` と反応の結果 `stats`。5秒ごと |
+| `/ritsu/memory_put` | `std_msgs/String` | 画面の律（kiosk） → 記憶 | JSON `{"key":"today/master","value":{...}}` |
+| `/ritsu/log` | `std_msgs/String` | 画面の律（kiosk） → 記憶 | JSON 来訪・反応・その結果の記録（`data/log/日付.jsonl` に追記） |
 
 - `/ritsu/chat_user` に応答するのは、URL に `?kiosk=1` を付けて開いた画面（キオスク表示）だけです。PC などで `index.html` を開いて確認しても、二重に返事をしません。
 - ROS 2 のコマンドで試す例: `docker exec -it ritsu-camera bash -c "source /opt/ros/jazzy/setup.bash && ros2 topic echo /ritsu/person"`
@@ -143,8 +156,9 @@ docker compose up -d --build              # 律の画面・rosbridge・人検出
 docker logs -f ritsu-camera               # 検出状況が5秒ごとに出る
 ```
 
-- 環境変数: `CAMERA_ROTATE`（カメラを縦置きしたとき 90/180/270）、`PERCEPTION_FPS`（1秒あたりの検出回数、既定 8）、`IMU_ROLL_SIGN`（傾けた向きと律がよろける向き。Gemini 335 実機に合わせて既定は -1）、`LOOK_YAW`（こちらを見ているとみなす顔の向き、既定 0.2 ≒ 20度。挨拶されにくければ大きく）、`TOUCH_DIST`（手を合わせる距離、既定 0.45m）、`DEBUG_SNAPSHOT`（1 で確認用画像を `:8080/debug/camera.jpg` に出す。LAN 内の誰でも見えるので確認後は外す）
+- 環境変数: `CAMERA_ROTATE`（カメラを縦置きしたとき 90/180/270）、`PERCEPTION_FPS`（1秒あたりの検出回数、既定 8）、`IMU_ROLL_SIGN`（傾けた向きと律がよろける向き。Gemini 335 実機に合わせて既定は -1）、`LOOK_YAW`（こちらを見ているとみなす顔の向き、既定 0.2 ≒ 20度。挨拶されにくければ大きく）、`TOUCH_DIST`（手を合わせる距離、既定 0.45m）、`MASTER_MATCH`（登録した顔とみなす類似度、既定 0.40。別の人をマスターと呼ぶなら上げる、本人なのに呼ばれなければ下げる）、`DEBUG_SNAPSHOT`（1 で確認用画像を `:8080/debug/camera.jpg` に出す。LAN 内の誰でも見えるので確認後は外す）
 - カメラから10秒映像が来なければ、自動で開き直します。
+- マスターの顔は、`http://192.168.3.80:8080/remote` の「マスター登録」→ カメラの正面で「登録」を押して約4秒じっとする、で登録します。眼鏡の有無・明るさ・少し違う向きで何回か登録すると見分けやすくなります（最大60枚分）。見分けは70px以上の大きさの、ほぼ正面の顔だけで、1秒に1回行います。ログの `id=master(0.62)` が見分けた結果と類似度です。入力ページは LAN 内の誰でも開けるので、登録ボタンも誰でも押せます。
 - 開発PC（WSL）で使うときは、Windows 側で usbipd-win を使ってカメラを WSL に渡します（`usbipd bind --busid <BUSID>` → `usbipd attach --wsl --busid <BUSID>`）。
 
 ## デバッグ
@@ -158,6 +172,9 @@ RITSU.brain.chat('こんにちは') // 会話テスト
 RITSU.ctx.describe()        // LLM に渡している「今の状況」
 RITSU.person(1.2)           // カメラ無しで人が来たことにする(距離[m])。8秒呼ばないと帰った扱い
 RITSU.look(true)            // 目が合ったことにする
-RITSU.hand(0.3)             // 画面のすぐ前に手が来たことにする(0.3秒以上続けて呼ぶ)
+RITSU.hand(0.3, 0.4)        // 画面のすぐ前に手が来たことにする(x/z, y/z。0.3秒以上続けて呼ぶ)
+RITSU.master(true)          // 目の前の人をマスターということにする
+RITSU.enroll()              // マスターの顔を登録する(RITSU.enroll('clear') で消す)
+RITSU.memory()              // 覚えていることと反応の結果
 RITSU.act('glassTouchR')    // モーションをカメラワーク付きで再生
 ```

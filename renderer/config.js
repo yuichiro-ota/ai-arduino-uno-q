@@ -29,6 +29,13 @@ window.RITSU_CONFIG = {
   // ニュースは聞かれたときにも答える。取らないときは docker-compose の NEWS_FEEDS を空にする
   newsIdleChance: 0.2,
 
+  // 声で話す(kiosk 画面のみ。文字起こし Whisper と音声合成 VOICEVOX は CT200 の voice-server)。null にすると声を使わない
+  //   speaker/style: VOICEVOX の声 / speed: 話す速さ / volume: 音量(0〜1。スピーカー本体でも調整できる)
+  //   needPerson: カメラに人が映っている間だけ聞く(周りの話し声に答えないように)
+  //   idleAloud: 誰もいないときの独り言も声に出す / listen: false で読み上げだけ(マイクを使わない)
+  voice: { stt: '/stt', tts: '/tts', speaker: 'WhiteCUL', style: 'ノーマル', speed: 1.05, volume: 1.0,
+           needPerson: true, idleAloud: false, listen: true },
+
   // 天気(Open-Meteo、APIキー不要)。設置場所の緯度・経度にする。null にすると天気を使わない
   //   UNO Q からインターネット(api.open-meteo.com)へ20分ごとに問い合わせる
   weather: { lat: 35.68, lon: 139.76, place: '東京', refreshMin: 20 },

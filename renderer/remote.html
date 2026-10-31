@@ -153,7 +153,7 @@
     const msg = parse(m.data);
     if (typeof msg.text !== 'string') return;
     if (msg.from === myId) add('me', msg.text);
-    else add('other', msg.text, msg.from === 'screen' ? '画面から' : 'ほかの人');
+    else add('other', msg.text, msg.from === 'screen' ? '画面から' : msg.from === 'voice' ? '声で' : 'ほかの人');
   });
   ros.sub('/ritsu/say', 'std_msgs/String', m => {
     const msg = parse(m.data);

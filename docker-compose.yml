@@ -22,6 +22,9 @@ services:
     ports:
       - "8080:80"
     env_file: .env                                  # LITELLM_URL / LITELLM_KEY
+    environment:                                    # 律の声の中継先(CT200)。.env に書けば上書きできる
+      - STT_URL=${STT_URL:-http://192.168.3.17:8100}
+      - TTS_URL=${TTS_URL:-http://192.168.3.17:50021}
     extra_hosts:
       - "host.docker.internal:host-gateway"         # ホストネットワークの rosbridge へ中継するため
     volumes:

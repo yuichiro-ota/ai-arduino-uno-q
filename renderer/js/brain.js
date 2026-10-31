@@ -13,7 +13,7 @@
 const RITSU_CFG = (() => {
   const cfg = Object.assign({
     llmUrl: '/llm', llmModel: 'chat',
-    weather: null, llmTimeoutSec: 30, llmReact: true, learn: true, newsIdleChance: 0.2, llmIdleChance: 0.67, idleSpeakChance: 0.75, idleMinSec: 10, idleMaxSec: 20, peekMinSec: 60, peekMaxSec: 120,
+    weather: null, voice: null, llmTimeoutSec: 30, llmReact: true, learn: true, newsIdleChance: 0.2, llmIdleChance: 0.67, idleSpeakChance: 0.75, idleMinSec: 10, idleMaxSec: 20, peekMinSec: 60, peekMaxSec: 120,
     pixelRatio: 1.5, antialias: true, petals: 40, simpleMaterials: false,
   }, window.RITSU_CONFIG || {});
   const q = new URLSearchParams(location.search);
@@ -28,6 +28,10 @@ const RITSU_CFG = (() => {
   if (q.get('model')) cfg.llmModel = q.get('model');
   // ?kiosk=1 の画面だけが ROS 2 の /ritsu/chat_user に応答する(デバッグで開いた他の画面と二重に返事しない)
   cfg.kiosk = q.get('kiosk') === '1';
+  // 声で話すのは kiosk 画面だけ(デバッグで開いた画面と二重にしゃべらない)。?voice=1 で kiosk 以外でも、?voice=0 で止める
+  cfg.voiceOn = !!cfg.voice && (q.get('voice') ? q.get('voice') === '1' : cfg.kiosk);
+  // ?needperson=0: カメラが無い PC で試すとき、人が映っていなくても聞く
+  if (cfg.voice && q.get('needperson') === '0') cfg.voice = { ...cfg.voice, needPerson: false };
   cfg.llmUrl = cfg.llmUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
   return cfg;
 })();

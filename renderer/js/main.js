@@ -15,6 +15,8 @@
  *   発行 /ritsu/memory_put     std_msgs/String  JSON {"key","value"} 覚えたことを保存 (kioskのみ)
  *   発行 /ritsu/log            std_msgs/String  JSON 来訪・反応・その結果の記録 (kioskのみ)
  *   発行 /ritsu/enroll         std_msgs/String  JSON {"action":"add"|"clear"} マスターの顔の登録 (RITSU.enroll())
+ *   声: voice.js が /stt (Whisper) で聞き取り、/tts (VOICEVOX) で読み上げる(kiosk 画面のみ)。聞き取った言葉は
+ *       /ritsu/chat_user に from:"voice" で流す
  *   発行 /ritsu/say            std_msgs/String  JSON {"text":"...","emotion":"happy","motion":"wave","source":"llm|fallback|idle|idle-llm"}
  *   発行 /ritsu/thinking       std_msgs/Bool    返事を考え中
  * =========================================================================
@@ -119,14 +121,15 @@
   let subTimer = null;
   let talkLeft = 0;           // 口パク残り時間[秒]
   let visemeA = 0;
-  function showSubtitle(text) {
+  /** flap: 字幕の文字数ぶん口をパクパクさせる(声で読み上げるときは音量で口を動かすので false) */
+  function showSubtitle(text, flap = true) {
     stopThinking();
     subtitle.textContent = text;
     subtitle.classList.add('show');
     clearTimeout(subTimer);
     subTimer = setTimeout(() => subtitle.classList.remove('show'),
                           Math.max(3500, text.length * 220));
-    talkLeft = text.length * 0.12;
+    talkLeft = flap ? text.length * 0.12 : 0;
   }
 
   /* ===== 考え中の「・・・」 =====
@@ -296,6 +299,7 @@
   /* ===== 会話 & 暇つぶし ===== */
   const lampLlm = document.getElementById('lamp-llm');
   const ctx = new RitsuContext({ weather: RITSU_CFG.weather });   // 日時・季節・天気・カメラ前の人など、会話に使う今の状況
+  let voice = null;              // 声 (下で作る。act から使う)
   const brain = new RitsuBrain({
     ctx,
     // 記憶と反応の記録は kiosk 画面だけが memory ノードへ送る(デバッグで開いた画面が書き換えないように)
@@ -310,7 +314,11 @@
       if (motion === 'noticeL' || motion === 'noticeR') startPan(motion === 'noticeR' ? 1 : -1);
       if (motion === 'seeOffL' || motion === 'seeOffR') startPan(motion === 'seeOffR' ? 1 : -1);
       if (text) {
-        showSubtitle(text);
+        // 声で読み上げる: 会話・反応はいつも、独り言は人がいるときだけ(誰もいないのにしゃべり続けないように)
+        const aloud = voice && voice.ttsOk &&
+                      (!String(source).startsWith('idle') || ctx.personPresent || RITSU_CFG.voice.idleAloud);
+        showSubtitle(text, !aloud);
+        if (aloud) voice.speak(text).then(ok => { if (!ok && subtitle.textContent === text) talkLeft = text.length * 0.12; });
         if (RITSU_CFG.kiosk) pubJson('/ritsu/say', { text, emotion, motion, source });
       }
     },
@@ -324,6 +332,28 @@
   });
   brain.ping();
   brain.startIdle();
+
+  /* ===== 声 (voice.js) =====
+   * MICランプ: 緑=聞いている / 黄=声を聞き取り中・文字にしている / 灰=マイクが使えない */
+  const lampMic = document.getElementById('lamp-mic');
+  voice = RITSU_CFG.voiceOn ? new RitsuVoice(RITSU_CFG.voice, {
+    // 返事を考えている間と、(needPerson のとき)カメラに誰も映っていない間は聞かない(周りの話し声に答えないように)
+    canListen: () => !brain.busy && (!RITSU_CFG.voice.needPerson || ctx.personPresent),
+    onText: text => {
+      if (chatOverRos()) pubJson('/ritsu/chat_user', { text, from: 'voice' });
+      else brain.chat(text);
+    },
+    onRecognizing: on => { if (on) startThinking(); else if (!brain.busy) endThinking(); },
+    onState: st => {
+      lampMic.classList.toggle('on', st === 'ready');
+      lampMic.classList.toggle('idle', st === 'hearing' || st === 'recognizing');
+    },
+  }) : null;
+  if (voice) {
+    document.getElementById('lamp-mic-wrap').classList.remove('hidden');
+    document.getElementById('credit').textContent = `VOICEVOX:${voice.cfg.speaker}`;
+    voice.init();
+  }
 
   if (ros) {
     if (RITSU_CFG.kiosk) {
@@ -386,6 +416,7 @@
       talkLeft -= dt;
       visemeA = 0.25 + 0.55 * Math.abs(Math.sin(now / 1000 * 11));
     }
+    if (voice && voice.speaking) visemeA = Math.max(visemeA, voice.update() * 0.9);   // 読み上げの音量で口を動かす
     mochiko.p.mouthOpen += (visemeA - mochiko.p.mouthOpen) * Math.min(1, dt * 14);
     visemeA *= 1 - Math.min(1, dt * 3);
 
@@ -427,6 +458,8 @@
     // マスターの顔を登録する(カメラの正面で約4秒じっとする)/ 消す。結果は /ritsu/enroll_status
     enroll: (action = 'add') => pubJson('/ritsu/enroll', { action }),
     memory: () => ({ ...brain.memory, stats: brain.stats }),
+    voice: () => voice,
+    speak: text => brain.act({ text, motion: 'talkGesture1', emotion: 'happy', source: 'llm' }),
     act: motion => brain.act({ motion }),
   };
 })();

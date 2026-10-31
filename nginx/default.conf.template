@@ -39,4 +39,15 @@ server {
         proxy_set_header Host $proxy_host;
         proxy_read_timeout 120s;
     }
+
+    # 律の声: 文字起こし(Whisper)と音声合成(VOICEVOX)。どちらも CT200 で動かす(voice-server/)
+    location /stt/ {
+        proxy_pass ${STT_URL}/;
+        client_max_body_size 6m;
+        proxy_read_timeout 60s;
+    }
+    location /tts/ {
+        proxy_pass ${TTS_URL}/;
+        proxy_read_timeout 60s;
+    }
 }

@@ -15,5 +15,8 @@ sleep 2
 
 # --ignore-gpu-blocklist: Adreno 702 は WebGL がブロックリスト入りしているため解除
 # --use-angle=gles     : 既定の描画方式だとGPUが固まるため OpenGL ES を直接使う
+# --autoplay-policy / --use-fake-ui-for-media-stream: 律の声を画面のタップなしで再生し、マイクの許可を自動で出す
+#   (マイク・スピーカーは OS の既定の機器。Anker PowerConf を既定にしておく)
 exec chromium --kiosk --noerrdialogs --disable-infobars --disable-session-crashed-bubble \
-  --ignore-gpu-blocklist --use-angle=gles --password-store=basic "$URL"
+  --ignore-gpu-blocklist --use-angle=gles --password-store=basic \
+  --autoplay-policy=no-user-gesture-required --use-fake-ui-for-media-stream "$URL"

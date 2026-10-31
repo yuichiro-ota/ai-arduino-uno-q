@@ -29,6 +29,7 @@ iPhone ─/remote─▶ nginx:8080 ─ /llm/* (+APIキー) ───────
 - 会話が無いと1〜2分に1回カメラが目元まで寄ってのぞき込む、話しかけると胸から上へ寄る、物音に振り向く
 - 一定間隔で独り言やダンスをする暇つぶし行動
 - **今の状況に合わせた会話**（`renderer/js/context.js`）: 日時・時間帯・季節・平日/土日/祝日（振替休日を含む）・季節の行事・天気（Open-Meteo、`config.js` の `weather` で場所を設定）・カメラ前の人の距離を LLM に渡し、会話が無い間は約20秒に1回しゃべり、そのうち約30秒に1回は LLM が状況から毎回違う独り言を作る（`config.js` の `idleMinSec` / `idleMaxSec` / `idleSpeakChance` / `llmIdleChance`）。残りは状況に合わせて用意したセリフから選ぶ。人が来たら時間帯に合った挨拶、帰ったらお見送り、とても近いと照れる
+- **声で話す**（`renderer/js/voice.js`、`voice-server/`）: USB スピーカーフォン（Anker PowerConf）で聞いて話す。話している区間を音量で切り出して CT200 の Whisper で文字にし、返事を VOICEVOX（WhiteCUL ノーマル）で読み上げ、声の大きさに合わせて口を動かす。最初の文ができたらすぐ話し始める。律がしゃべっている間とカメラに誰も映っていない間は聞かない。誰もいないときの独り言は声に出さない。画面右下に「VOICEVOX:WhiteCUL」と表示（VOICEVOX の利用条件）
 - **最近のニュース**: memory ノードが30分ごとに Yahoo!ニュース・トピックスの見出し（主要・エンタメ・スポーツ・科学・IT）を取り、事件・事故・災害などの暗い見出しを除いて律に渡す。聞かれたら答え、会話が無い間の独り言でもときどき話題にする（`config.js` の `newsIdleChance`）。見出しに無い内容は推測で話さない
 - **考え中の「・・・」**: LLM に問い合わせている間は吹き出しに「・・・」を出す（話しかけへの返事はすぐ、独り言や反応は0.4秒たっても答えが無いときだけ）
 - **返答の検証**: LLM の返答から知らない表情・モーション名、崩れたタグ、記号、絵文字、名前の前置きを取り除き、長すぎる返答は文の区切りで切る。日本語でない返答は使わない
@@ -45,6 +46,8 @@ iPhone ─/remote─▶ nginx:8080 ─ /llm/* (+APIキー) ───────
 | `ros/ritsu_perception.py` | 人検出・傾き・マスターの顔の見分けの ROS 2 ノード |
 | `ros/ritsu_memory.py` | 記憶（`data/memory.json`）と反応の記録（`data/log/`）、ニュースの見出しの取得の ROS 2 ノード |
 | `data/` | 記憶・反応の記録・登録した顔の数値（UNO Q の中だけ。Git の管理外） |
+| `voice-server/` | CT200 に入れる声のサーバー: `stt_server.py`（faster-whisper の文字起こし :8100）と `setup-ct200.sh`（Whisper と VOICEVOX ENGINE を systemd サービスとして入れる） |
+| `renderer/js/voice.js` | マイクで聞く（区間の切り出し → /stt）・読み上げ（/tts）・口の動き |
 | `renderer/config.js` | モデル名（`chat` / `chat-large`）、タイムアウト、暇つぶし・のぞき込みの間隔、描画の重さ |
 | `renderer/index.html` | 画面（three.js / three-vrm / roslib.js は jsdelivr CDN から読み込み） |
 | `renderer/remote.html` | iPhone などから話しかける入力ページ |
@@ -149,6 +152,36 @@ sudo reboot
 - `/ritsu/chat_user` に応答するのは、URL に `?kiosk=1` を付けて開いた画面（キオスク表示）だけです。PC などで `index.html` を開いて確認しても、二重に返事をしません。
 - ROS 2 のコマンドで試す例: `docker exec -it ritsu-camera bash -c "source /opt/ros/jazzy/setup.bash && ros2 topic echo /ritsu/person"`
 - 別のマシン（台車の Jetson など）の ROS 2 からも、同じネットワーク・同じ `ROS_DOMAIN_ID`（既定 0）ならトピックが見えます。
+
+## 声（マイク・スピーカー）
+
+```
+Anker PowerConf ─USB─ UNO Q  Chromium(律) ─ /stt/ ─▶ CT200 ritsu-stt  :8100  (Whisper large-v3-turbo, GPU)
+                                         └ /tts/ ─▶ CT200 ritsu-tts  :50021 (VOICEVOX ENGINE, GPU)
+```
+
+1. **CT200 に声のサーバーを入れる**（Proxmox 本体で。ディスクの空き約10GB、CT200 のメモリを 7〜8GB に増やしてから）
+   ```bash
+   pct set 200 -memory 8192
+   pct push 200 voice-server/setup-ct200.sh /root/setup-ct200.sh
+   pct push 200 voice-server/stt_server.py  /root/stt_server.py
+   pct exec 200 -- bash /root/setup-ct200.sh
+   ```
+   VOICEVOX のダウンロード（約2.8GB）と Whisper のモデル（約1.6GB）で、初回は時間がかかります。状態は `pct exec 200 -- journalctl -u ritsu-stt -u ritsu-tts -f`。
+2. **UNO Q**: `git pull` → `docker compose up -d --force-recreate renderer`（nginx に /stt/ /tts/ の中継が増えるため）。中継先は既定で CT200（`.env` の `STT_URL` / `TTS_URL` で変えられる）
+3. **UNO Q の既定のマイク・スピーカーを PowerConf にする**
+   ```bash
+   pactl list short sinks; pactl list short sources          # PowerConf の名前を確認
+   pactl set-default-sink   <alsa_output.usb-...PowerConf...>
+   pactl set-default-source <alsa_input.usb-...PowerConf...>
+   ```
+   そのあとキオスクを起動し直す（`kiosk/ritsu-kiosk.sh` はタップなしで音を出し、マイクの許可を自動で出すオプション付き）
+4. 画面左上に **MIC** ランプが出る: 緑=聞いている / 黄=声を聞き取り中・文字にしている / 灰=マイクが使えない
+
+- 設定は `config.js` の `voice`（声の種類・速さ・音量、人が映っている間だけ聞くか、誰もいないときの独り言も声に出すか）。`voice: null` で声を使わない
+- 声で話すのは kiosk 画面だけ。PC で試すときは `http://localhost:8080/?voice=1&needperson=0`（マイクは `localhost` か https でしか使えないので、PC で動かした律の画面で試す）
+- 聞き取った言葉は入力ページの履歴に「声で」と出る
+- PowerConf はバッテリー入りなので、つなぎっぱなしで長く使うと電池が傷みやすい
 
 ## 記憶・ニュース（memory ノード）
 

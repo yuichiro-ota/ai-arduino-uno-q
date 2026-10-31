@@ -36,7 +36,8 @@ mkdir -p "$DIR/models"
 "$DIR/venv/bin/pip" install -q "faster-whisper>=1.1,<2" fastapi "uvicorn[standard]" python-multipart \
     nvidia-cublas-cu12 "nvidia-cudnn-cu12>=9,<10"
 install -m 644 "$HERE/stt_server.py" "$DIR/stt_server.py"
-LIBS=$("$DIR/venv/bin/python" -c 'import os, nvidia.cublas.lib as b, nvidia.cudnn.lib as d; print(os.path.dirname(b.__file__) + ":" + os.path.dirname(d.__file__))')
+# nvidia.*.lib は __init__.py の無いパッケージ(__file__ が無い)なので __path__ から場所を取る
+LIBS=$("$DIR/venv/bin/python" -c 'import nvidia.cublas.lib as b, nvidia.cudnn.lib as d; print(list(b.__path__)[0] + ":" + list(d.__path__)[0])')
 
 say "音声合成(VOICEVOX ENGINE $VOICEVOX_VER、GPU 版)"
 if [ ! -x "$DIR/voicevox/run" ] || [ "$(cat "$DIR/voicevox/.version" 2>/dev/null)" != "$VOICEVOX_VER" ]; then

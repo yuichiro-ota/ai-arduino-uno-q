@@ -230,7 +230,7 @@ Linux 側の `base` サービス（`ros/ritsu_base.py`）が `/cmd_vel` を4輪�
 | 右前 | ② ENA・IN1/IN2・OUT1/OUT2 | D5 | D7 / D8 | D6 / A5 |
 | 右後 | ② ENB・IN3/IN4・OUT3/OUT4 | D9 | A2 / A3 | D13 / D1 |
 
-- EN のピンにはスケッチで `pinMode()` をしない（UNO Q では `analogWrite` の PWM が出なくなる）。D11 は EN にしたらモーターが鳴るだけで回らなかったので、エンコーダーに使う
+- EN のピンにはスケッチで `pinMode()` をしない（UNO Q では `analogWrite` の PWM が出なくなる）
 
 - 回った向きは B相で読む。B相の極性は最初に少し回したときに自動で合わせ、読めない車輪は回した向きとみなす（`/remote` の「動かす」に「B相 左前・…」と読めている車輪が出る）
 

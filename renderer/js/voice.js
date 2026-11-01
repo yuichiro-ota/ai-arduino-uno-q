@@ -21,6 +21,14 @@ const VOICE_TAIL_SEC = 0.5;        // 律がしゃべり終えてから、この
 // 無音や雑音から Whisper が作りがちな文(動画の締めの言葉など)。これだけなら捨てる
 // 「律ちゃん」の聞き違い(小さいモデルは「ただしちゃん」「りっちゃん」などと書く)を直す
 const NAME_FIX = /(りつ|リツ|りっ|リッ|ただし|立|率)(ちゃん|さん)/g;
+// 読み上げで VOICEVOX が読み間違える記号を、読み方に直す(字幕はそのまま)。「℃」は「ドシー」と読んでしまう
+const READ_FIX = [
+  [/(?<![\dA-Za-z])[-−](?=\d)/g, 'マイナス'],       // -3℃ (「3-4」のような区切りはそのまま)
+  [/(?:℃|°[CＣ]|度C)/g, '度'],
+  [/[%％]/g, 'パーセント'],
+  [/(\d)\s*[〜～~]\s*(?=\d)/g, '$1から'],
+];
+const readable = text => READ_FIX.reduce((t, [re, to]) => t.replace(re, to), text);
 const STT_HALLUCINATIONS = /^(ご視聴ありがとうございました|チャンネル登録(よろしくお願いします)?|ご清聴ありがとうございました|おやすみなさい|字幕.*|はい)[。!！]?$/;
 
 class RitsuVoice {
@@ -95,6 +103,7 @@ class RitsuVoice {
     if (!this.ttsOk || !text) return Promise.resolve(false);
     const seq = ++this._seq;
     this.stop();
+    text = readable(text);
     const sentences = (text.match(/[^。!?！？]+[。!?！？…」]*/g) || [text]).map(t => t.trim()).filter(Boolean);
     const jobs = [];
     const synth = i => (jobs[i] = jobs[i] || this._synth(sentences[i]));

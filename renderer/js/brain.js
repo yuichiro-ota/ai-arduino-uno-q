@@ -57,6 +57,9 @@ const RESUME_LINES = ['ありがとうございます。またお話しします
 // 左右は律から見た向き。短い頼み方だけ(長い文や「左向いてる?」のような質問は普通の会話)
 const MOVE_MAX_CHARS = 20;
 const MOVE_COMMANDS = [
+  // 「こっち向いて」: 顔が見えていなくても、最後に見た側へ回って探し、正面まで向き直る
+  { action: 'face', re: /(こっち|こちら|私の方|わたしの方|僕の方|ぼくの方|俺の方)を?(向|む)いて/,
+    lines: ['はい、そちらを向きますね。', 'はい!'], motion: 'nod' },
   { action: 'back', re: /(後ろ|うしろ)に?(下が|さが)って|^(ちょっと|少し|すこし|もう少し|もうちょっと)?(下が|さが)って|バックして/,
     lines: ['はい、少し下がりますね。', 'わかりました。ちょっと下がります。'], motion: 'nod' },
   { action: 'forward', re: /(前|まえ|こっち|こちら|近く|ちかく)に(来|き)て|(前|まえ)に(出|で)て|(近づ|ちかづ)いて/,
@@ -367,7 +370,8 @@ class RitsuBrain {
   /** persist: { put(key, value), log(obj) } — 記憶と反応の記録を ROS 2 の memory ノードへ送る(kiosk 画面だけ)
    *  onQuery(n) — LLM に問い合わせ中の数(独り言・反応も含む。会話の要約は含まない)が変わったとき */
   /** onInterrupt() — 話しかけられた(しゃべっている独り言などを止める)
-   *  onTurn({reason}) — 台車ごと相手の方を向いてほしい(台車のノードが顔を見ながら回る)
+   *  onTurn({reason, search}) — 台車ごと相手の方を向いてほしい(台車のノードが顔を見ながら回る。
+   *                             search: 顔が見えていなくても最後に見た側へ回って探す・小さなずれでも正面まで向く)
    *  onMove(action) — 台車で少し動いてほしい('back' / 'forward' / 'left' / 'right') */
   constructor({ act, onStatus, onThinking, onQuery, onInterrupt, onTurn, onMove, ctx, persist }) {
     this.onInterrupt = onInterrupt || (() => {});
@@ -464,7 +468,8 @@ class RitsuBrain {
     if (!cmd) return false;
     const close = cmd.action === 'forward' && this.ctx.personPresent && this.ctx.personZ < MOVE_TOO_CLOSE;
     const text = close ? 'これ以上近づくと、ぶつかってしまいそうです。' : pick(cmd.lines);
-    if (!close) this.onMove(cmd.action);
+    if (cmd.action === 'face') this.onTurn({ reason: 'face', search: true });   // 頼まれたので静かにしていても向く
+    else if (!close) this.onMove(cmd.action);
     this.history = [...this.history, { role: 'user', content: userText }, { role: 'assistant', content: text }].slice(-12);
     this.act({ text, motion: close ? 'shakeNo' : cmd.motion, emotion: close ? 'shy' : 'happy', source: 'llm' });
     this.lastInteraction = this.lastChat = performance.now();

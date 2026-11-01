@@ -336,7 +336,7 @@
       if (RITSU_CFG.kiosk) pubBool('/ritsu/thinking', on);
     },
     // 台車ごと相手の方を向く(台車のノード ritsu_base が顔を見ながら回る。kiosk のみ)
-    onTurn: ({ reason }) => { if (RITSU_CFG.kiosk) pubJson('/ritsu/turn', { reason, sec: 8 }); },
+    onTurn: ({ reason, search }) => { if (RITSU_CFG.kiosk) pubJson('/ritsu/turn', { reason, sec: search ? 12 : 8, search: !!search }); },
     // 「後ろに下がって」「前に来て」「左向いて」「右向いて」で台車が少し動く(kiosk のみ)
     onMove: action => { if (RITSU_CFG.kiosk) pubJson('/ritsu/move', { action }); },
     onQuery,

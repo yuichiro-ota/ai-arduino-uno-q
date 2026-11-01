@@ -10,7 +10,9 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
                     CMD_TIMEOUT_SEC 来なければ止まる。速さは MAX_LINEAR / MAX_ANGULAR まで
   /ritsu/base_test  std_msgs/String  JSON {"wheel":0-3, "pwm":-255〜255, "sec":1}
                     1輪だけ PWM を直接出す(配線と向きの確かめ用。0=左前 1=右前 2=左後 3=右後)
-  /ritsu/turn       std_msgs/String  JSON {"reason":"greet", "sec":8}  人の方を向いてと頼む(画面の律が反応するときに送る)
+  /ritsu/turn       std_msgs/String  JSON {"reason":"greet", "sec":8, "search":false}  人の方を向いてと頼む(画面の律が反応するときに送る)
+                    search=true(「こっち向いて」と頼まれた): 顔が見えていなければ最後に見た側へ回って探し(SEARCH_MAX_DEG まで)、
+                    ずれが小さくても正面まで向く
                     /ritsu/person の顔の左右のずれを見ながらその場で回り、正面(TURN_DONE_DEG 以内)で止まる。
                     ずれが TURN_START_DEG 以内なら回らない(目線だけで足りる)。顔を見失う・sec 秒たつ・
                     /cmd_vel(手の操作)が来たらやめる
@@ -67,6 +69,8 @@ TURN_START_DEG = 10                  # 頼まれたとき、ずれがこれ以�
 TURN_DONE_DEG = 5                    # これ以内に入ったら止まる
 TURN_LOST_SEC = 1.0                  # 顔をこれだけ見失ったらやめる
 TURN_SEC_MAX = 15
+SEARCH_MAX_DEG = 150                 # 「こっち向いて」で顔を探して回る角度の上限
+SEARCH_SPEED = 0.35                  # [rad/s] 探すときの回る速さ
 MOVE_DIST = float(os.environ.get("MOVE_DIST", "0.15"))
 MOVE_TURN_DEG = float(os.environ.get("MOVE_TURN_DEG", "30"))
 MOVE_SPEED = 0.1                     # [m/s] 前後に動く速さ
@@ -144,17 +148,24 @@ def main():
         try:
             m = json.loads(msg.data)
             reason, sec = str(m.get("reason", ""))[:20], min(TURN_SEC_MAX, float(m.get("sec", 8)))
+            search = bool(m.get("search", False))
         except (ValueError, TypeError, AttributeError):
             return
         p = st["person"]
         if not st["turn_enable"] or st["test"] or time.monotonic() - st["cmd_at"] < 1.0:
             return
-        if not p or time.monotonic() - p[2] > TURN_LOST_SEC:
+        seen = p and time.monotonic() - p[2] <= TURN_LOST_SEC
+        if not seen and not search:
             return
-        if abs(math.degrees(math.atan2(p[0], p[1]))) <= TURN_START_DEG:
+        if seen and abs(math.degrees(math.atan2(p[0], p[1]))) <= (TURN_DONE_DEG if search else TURN_START_DEG):
             return                       # ほぼ正面: 目線だけで足りる
-        st["turn"] = {"reason": reason, "until": time.monotonic() + sec}
-        node.get_logger().info(f"人の方を向く: {reason} ({math.degrees(math.atan2(p[0], p[1])):+.0f}度)")
+        # 見えていなければ、最後に顔を見た側へ探しに回る(一度も見ていなければ左回り)
+        side = -1.0 if p and p[0] > 0 else 1.0
+        st["turn"] = {"reason": reason, "until": time.monotonic() + sec, "search": search and not seen,
+                      "side": side, "th": st["th"], "since": time.monotonic()}
+        st["move"] = None
+        where = f"{math.degrees(math.atan2(p[0], p[1])):+.0f}度" if seen else f"顔が見えないので{'右' if side < 0 else '左'}へ探す"
+        node.get_logger().info(f"人の方を向く: {reason} ({where})")
 
     def on_move(msg):
         try:
@@ -195,7 +206,18 @@ def main():
         t, p, now = st["turn"], st["person"], time.monotonic()
         if not t:
             return None
-        if now > t["until"] or not p or now - p[2] > TURN_LOST_SEC:
+        seen = p and now - p[2] <= TURN_LOST_SEC
+        if t["search"]:
+            if seen and p[2] > t.get("since", 0):
+                t["search"] = False      # 見つけた: ここから顔を見ながら正面に合わせる
+                node.get_logger().info(f"顔を見つけた: {math.degrees(math.atan2(p[0], p[1])):+.0f}度")
+            elif now > t["until"] or abs(math.degrees(st["th"] - t["th"])) >= SEARCH_MAX_DEG:
+                node.get_logger().info(f"顔が見つからなかった: {t['reason']}")
+                st["turn"] = None
+                return None
+            else:
+                return SEARCH_SPEED * t["side"] * TURN_SIGN
+        if now > t["until"] or not seen:
             st["turn"] = None
             return None
         angle = math.atan2(p[0], p[1])   # 右にいるほど正

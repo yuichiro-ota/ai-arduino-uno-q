@@ -402,7 +402,7 @@
   const turnEnable = $('turn-enable');
   turnEnable.addEventListener('change', () => ros.pub('/ritsu/turn_enable', 'std_msgs/Bool', { data: turnEnable.checked }));
   $('turn-now').addEventListener('click', () =>
-    ros.pub('/ritsu/turn', 'std_msgs/String', { data: JSON.stringify({ reason: 'remote', sec: 8 }) }));
+    ros.pub('/ritsu/turn', 'std_msgs/String', { data: JSON.stringify({ reason: 'remote', sec: 12, search: true }) }));
   let baseAt = 0;
   ros.sub('/ritsu/base_status', 'std_msgs/String', m => {
     const st = parse(m.data);

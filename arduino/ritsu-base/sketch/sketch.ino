@@ -25,8 +25,8 @@ struct WheelPins { uint8_t en, in1, in2, enc, encB; };
 const WheelPins PINS[4] = {
   {3, 2, 4, 11, A4},    // 左前
   {5, 7, 8, 6, A5},     // 右前
-  {10, A0, A1, 12, 0},  // 左後
-  {9, A2, A3, 1, 13},   // 右後(D13 では A相のパルスを数えられなかったので、A相を D1・B相を D13 で読む)
+  {10, A0, A1, 0, 13},  // 左後
+  {9, A2, A3, 1, 12},   // 右後
 };
 
 const unsigned long CMD_TIMEOUT_MS = 500;

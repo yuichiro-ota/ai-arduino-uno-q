@@ -126,7 +126,7 @@ String base_pwm(int fl, int fr, int rl, int rr) {
 
 void setup() {
   for (int i = 0; i < 4; i++) {
-    pinMode(PINS[i].en, OUTPUT);
+    // EN に pinMode() をすると、UNO Q (Zephyr) では analogWrite() の PWM が出なくなるので呼ばない
     pinMode(PINS[i].in1, OUTPUT);
     pinMode(PINS[i].in2, OUTPUT);
     drive(i, 0);

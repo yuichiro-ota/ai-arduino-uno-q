@@ -2,7 +2,8 @@
  * voice.js — 声で話す
  *   聞く: マイク → 話している区間だけを切り出す(音量で判定) → /stt (Whisper, CT200) → 文字 → onText
  *   話す: 律のセリフ → /tts (VOICEVOX, CT200) → 再生。再生中の音量で口を動かす(level)
- *   律がしゃべっている間と、その直後はマイクを使わない(自分の声を聞き取らないように)。
+ *   割り込み: 律がしゃべっている間も聞き、はっきりした声が続いたら律の声を止めて聞く(bargeIn)。
+ *   自分の声を拾わないよう、その間は「声」とみなす大きさを上げる。
  *   スピーカーフォン(Anker PowerConf)本体とブラウザの両方のエコーキャンセルも使う。
  * ========================================================================= */
 
@@ -17,7 +18,12 @@ const VOICE_NOISE_K = 3;           // 周りの雑音の何倍の大きさなら
 // 相槌。返事を待たせずにすぐ言えるよう、話者が決まったら先に作っておく
 //   ack: 相手が話し終わった直後 / think: 返事を考えるのに時間がかかっているとき
 const FILLERS = { ack: ['うんうん', 'はい', 'なるほど', 'ふむふむ', 'うん'], think: ['えっと……', 'うーん、そうですね……'] };
-const VOICE_TAIL_SEC = 0.5;        // 律がしゃべり終えてから、この秒数はマイクを使わない(残響を拾わないように)
+const VOICE_TAIL_SEC = 0.5;        // 律がしゃべり終えてから、この秒数は割り込みと同じ扱い(残響を拾わないように)
+// 割り込み: 律がしゃべっている間は、周りの雑音の VOICE_BARGE_K 倍か VOICE_BARGE_MIN_RMS の大きい方を超える音が
+// VOICE_BARGE_FRAMES 回続いたら(約260ms)、相手が話し始めたとみなす(スピーカーから漏れた律の声で止まらないように)
+const VOICE_BARGE_K = 3;
+const VOICE_BARGE_MIN_RMS = 0.04;
+const VOICE_BARGE_FRAMES = 6;
 // 無音や雑音から Whisper が作りがちな文(動画の締めの言葉など)。これだけなら捨てる
 // 「律ちゃん」の聞き違い(小さいモデルは「ただしちゃん」などと書く)を直す。愛称の「りっちゃん」はそのまま(書き方だけそろえる)
 const NAME_FIX = /(りつ|リツ|ただし|立|率)(ちゃん|さん)/g;
@@ -52,10 +58,11 @@ class RitsuVoice {
   /** cfg: config.js の voice / onText(text): 聞き取れた言葉 / canListen(): 今聞いてよいか /
    *  onState(state): 'off' | 'ready' | 'paused'(人がいない・返事中などで聞いていない) | 'hearing' | 'recognizing'
    *  (MIC ランプ用) / onRecognizing(on) /
-   *  onSpeechEnd(sec): 相手が話し終わった(文字にする前。相槌用) */
-  constructor(cfg, { onText, canListen, onState, onRecognizing, onSpeechEnd } = {}) {
+   *  onSpeechEnd(sec): 相手が話し終わった(文字にする前。相槌用) / onBargeIn(): 律の声を止めて聞き始めた */
+  constructor(cfg, { onText, canListen, onState, onRecognizing, onSpeechEnd, onBargeIn } = {}) {
     this.cfg = Object.assign({ stt: '/stt', tts: '/tts', speaker: 'WhiteCUL', style: 'ノーマル', speed: 1.0,
-                               volume: 1.0, listen: true }, cfg || {});
+                               volume: 1.0, listen: true, bargeIn: true }, cfg || {});
+    this.onBargeIn = onBargeIn || (() => {});
     this.onText = onText || (() => {});
     this.canListen = canListen || (() => true);
     this.onState = onState || (() => {});
@@ -65,8 +72,9 @@ class RitsuVoice {
     // マイクの様子(確認用。RITSU.micTest() と /remote の「マイク」)
     //   frames: 届いた音の数(増えていればマイクの音は来ている) / peak: 前回見たとき以降の一番大きい音 /
     //   why: 聞いていない理由 / heard・ignored・error: 最後に文字にしたもの・捨てたもの・失敗
-    this.mic = { level: 0, peak: 0, threshold: 0, listening: false, why: '', device: '', capture: '', frames: 0,
-                 heard: null, ignored: null, error: null };   // マイクの様子(確認用。RITSU.micTest())
+    //   echo: 律がしゃべっている間に拾った一番大きい音(割り込みの大きさ bargeThreshold を決める目安)
+    this.mic = { level: 0, peak: 0, threshold: 0, bargeThreshold: 0, echo: 0, listening: false, why: '', device: '',
+                 capture: '', frames: 0, heard: null, ignored: null, error: null };   // マイクの様子(確認用。RITSU.micTest())
     this.ctx = null;
     this.speakerId = null;
     this.ttsOk = false;
@@ -124,6 +132,7 @@ class RitsuVoice {
     if (!this.ttsOk || !text) return Promise.resolve(false);
     const seq = ++this._seq;
     this.stop();
+    this.fillerPlaying = false;
     text = readable(text);
     const sentences = (text.match(/[^。!?！？]+[。!?！？…」]*/g) || [text]).map(t => t.trim()).filter(Boolean);
     const jobs = [];
@@ -194,10 +203,17 @@ class RitsuVoice {
     const list = this.fillers[kind];
     if (!list || !list.length || this.speaking) return false;
     const seq = ++this._seq;
+    this.fillerPlaying = true;
     this._play(list[Math.floor(Math.random() * list.length)]).then(() => {
       if (seq === this._seq) { this.speaking = false; this.speakEnd = performance.now(); }
     });
     return true;
+  }
+
+  /** しゃべっているセリフを、続きの文も含めて止める(割り込まれた・話しかけられた) */
+  interrupt() {
+    ++this._seq;
+    this.stop();
   }
 
   stop() {
@@ -246,10 +262,12 @@ class RitsuVoice {
       let sum = 0;
       for (const v of x) sum += v * v;
       const rms = Math.sqrt(sum / x.length);
-      const why = this.speaking ? '律が話している' : performance.now() - this.speakEnd < VOICE_TAIL_SEC * 1000 ? '話し終わった直後'
-                : !this.canListen() ? '返事を考え中か、カメラに人がいない' : '';
+      const talking = this.speaking || performance.now() - this.speakEnd < VOICE_TAIL_SEC * 1000;
+      const why = !this.canListen() ? '返事を考え中か、カメラに人がいない' : talking && !this.cfg.bargeIn ? '律が話している' : '';
       const busy = !!why;
       const th = Math.max(VOICE_MIN_RMS, noise * VOICE_NOISE_K);
+      const bth = Math.max(VOICE_BARGE_MIN_RMS, noise * VOICE_BARGE_K);
+      this.mic.bargeThreshold = bth;
       this.mic.frames++;
       this.mic.why = why;
       this.mic.peak = Math.max(this.mic.peak, rms);
@@ -263,6 +281,20 @@ class RitsuVoice {
       if (busy) {                                   // 聞かない間は捨てる
         if (inSpeech) this.onState('paused');
         inSpeech = false; loud = 0; chunks = []; pre = [];
+        return;
+      }
+      if (!inSpeech && talking) {                   // 律がしゃべっている: はっきりした声が続いたら止めて聞く
+        this.mic.echo = Math.max(this.mic.echo, rms);
+        pre.push(x);
+        if (pre.length > VOICE_PREROLL) pre.shift();
+        loud = rms > bth ? loud + 1 : 0;
+        if (loud >= VOICE_BARGE_FRAMES) {
+          console.log(`[voice] barge-in (level ${rms.toFixed(3)} > ${bth.toFixed(3)})`);
+          this.interrupt();
+          this.onBargeIn();
+          inSpeech = true; quiet = 0; chunks = [...pre]; pre = [];
+          this.onState('hearing');
+        }
         return;
       }
       if (!inSpeech) {

@@ -221,7 +221,8 @@
     $('mic-th').style.left = scale(st.threshold) + '%';
     $('mic-state').textContent = st.audio !== 'running' ? `音が止まっています(${st.audio})。画面を一度タップしてください`
       : !flowing ? `マイクの音が届いていません(取り込み: ${st.capture || 'なし'})`
-      : `音 ${st.peak.toFixed(3)} / 声とみなす ${st.threshold.toFixed(3)}(取り込み: ${st.capture})`;
+      : `音 ${st.peak.toFixed(3)} / 声とみなす ${st.threshold.toFixed(3)}・律が話している間 ${st.barge}` +
+        (st.echo ? `(拾った律の声 ${st.echo})` : '') + `(取り込み: ${st.capture})`;
     $('mic-listen').textContent = st.listening ? 'はい' : `いいえ(${st.why || '-'})`;
     $('mic-heard').textContent = st.heard ? `「${st.heard.text}」 ${st.heard.sec}秒の声 ${ago(st.heard.at)}` : '-';
     $('mic-ignored').textContent = st.ignored ? `「${st.ignored.text}」 ${ago(st.ignored.at)}` : '-';

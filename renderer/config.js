@@ -34,8 +34,9 @@ window.RITSU_CONFIG = {
   //   needPerson: true でカメラに人が映っている間だけ聞く(周りの話し声に答えないように)。false はいつでも聞く
   //   idleAloud: 独り言も声に出す(false にすると、独り言はカメラに人が映っているときだけ声に出す) / listen: false で読み上げだけ(マイクを使わない)
   //   aizuchi: 話し終わった直後に「うんうん」などと相槌を打つ確率(0〜1)
+  //   bargeIn: 律がしゃべっている途中でも、相手が話し始めたら止めて聞く(false で、しゃべり終わるまで聞かない)
   voice: { stt: '/stt', tts: '/tts', speaker: 'WhiteCUL', style: 'ノーマル', speed: 1.05, volume: 1.0,
-           needPerson: false, idleAloud: true, listen: true, aizuchi: 0.7 },
+           needPerson: false, idleAloud: true, listen: true, aizuchi: 0.7, bargeIn: true },
 
   // 天気(Open-Meteo、APIキー不要)。設置場所の緯度・経度にする。null にすると天気を使わない
   //   UNO Q からインターネット(api.open-meteo.com)へ20分ごとに問い合わせる

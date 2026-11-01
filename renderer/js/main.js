@@ -324,6 +324,11 @@
     },
     // LLMランプ: 緑=返事が来ている / 黄=返事が遅い(独り言・反応は用意したセリフにしている) / 灰=つながらない・失敗
     onStatus: st => { lampLlm.classList.toggle('on', st === true); lampLlm.classList.toggle('idle', st === 'slow'); },
+    // 話しかけられた: しゃべっている独り言を止める(返事を最優先にする)
+    onInterrupt: () => {
+      if (voice && !voice.fillerPlaying) voice.interrupt();   // 「うんうん」などの相槌は最後まで言う
+      talkLeft = 0;
+    },
     onThinking: on => {
       if (on) startThinking(); else endThinking();
       if (RITSU_CFG.kiosk) pubBool('/ritsu/thinking', on);
@@ -368,6 +373,12 @@
     },
     onRecognizing: on => { if (on) startThinking(); else if (!brain.busy) endThinking(); },
     // 相槌: 話し終わった直後に「うんうん」などとうなずく(短すぎる声・確率 aizuchi で間引く)
+    // 割り込み: 律の声を止めて、聞く姿勢に
+    onBargeIn: () => {
+      talkLeft = 0;
+      subtitle.classList.remove('show');
+      player.play('listening');
+    },
     onSpeechEnd: sec => {
       if (sec < AIZUCHI_MIN_SEC || Math.random() >= (RITSU_CFG.voice.aizuchi ?? 0.7)) return;
       if (voice.filler('ack')) player.play('nod');
@@ -393,8 +404,9 @@
       const m = voice.mic;
       pubJson('/ritsu/voice_status', { capture: m.capture, device: m.device, audio: voice.ctx ? voice.ctx.state : '',
         frames: m.frames, level: +m.level.toFixed(3), peak: +m.peak.toFixed(3), threshold: +m.threshold.toFixed(3),
-        listening: m.listening, why: m.why, tts: voice.ttsOk, heard: m.heard, ignored: m.ignored, error: m.error });
+        listening: m.listening, why: m.why, barge: +m.bargeThreshold.toFixed(3), echo: +m.echo.toFixed(3), tts: voice.ttsOk, heard: m.heard, ignored: m.ignored, error: m.error });
       m.peak = 0;
+      m.echo = 0;
     }, 1000);
   }
 

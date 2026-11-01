@@ -317,7 +317,10 @@ class RitsuBrain {
    *  onThinking(on) で返事を考え中かどうかを通知。ctx は RitsuContext(今の状況) */
   /** persist: { put(key, value), log(obj) } — 記憶と反応の記録を ROS 2 の memory ノードへ送る(kiosk 画面だけ)
    *  onQuery(n) — LLM に問い合わせ中の数(独り言・反応も含む。会話の要約は含まない)が変わったとき */
-  constructor({ act, onStatus, onThinking, onQuery, ctx, persist }) {
+  /** onInterrupt() — 話しかけられた(しゃべっている独り言などを止める) */
+  constructor({ act, onStatus, onThinking, onQuery, onInterrupt, ctx, persist }) {
+    this.onInterrupt = onInterrupt || (() => {});
+    this.sideRequests = new Set();   // 独り言・反応の LLM 問い合わせ(話しかけられたら打ち切る)
     // 静かにしている間は、自分から言うセリフ(独り言・反応 = source が idle〜)を言わず、動きだけにする
     this.act = a => act(this.quiet && a.text && String(a.source).startsWith('idle') ? { ...a, text: null } : a);
     this.quietUntil = 0;
@@ -366,6 +369,9 @@ class RitsuBrain {
       if (this.queue.length < QUEUE_MAX) this.queue.push(userText);
       return;
     }
+    // 話しかけが最優先: しゃべっている独り言を止め、独り言・反応の問い合わせを打ち切る(LLM を会話に空ける)
+    this.onInterrupt();
+    for (const c of this.sideRequests) c.abort();
     if (this._quietCommand(userText)) return;
     this.busy = true;
     this.lastChat = performance.now();
@@ -408,13 +414,17 @@ class RitsuBrain {
 
   /** LiteLLM へ問い合わせて返答の本文を返す。失敗したら null */
   /** quiet: 吹き出しに「考え中」を出さない(人に見せない裏の問い合わせ) */
-  async _request(messages, temperature, timeoutSec = RITSU_CFG.llmTimeoutSec, quiet = false) {
+  /** side: 独り言・反応の問い合わせ(話しかけられたら打ち切る) */
+  async _request(messages, temperature, timeoutSec = RITSU_CFG.llmTimeoutSec, quiet = false, side = false) {
     if (!quiet) this.onQuery(++this.queries);
     const started = performance.now();
+    const cut = side ? new AbortController() : null;
+    if (cut) this.sideRequests.add(cut);
+    const timeout = AbortSignal.timeout(timeoutSec * 1000);
     try {
       const res = await fetch(`${RITSU_CFG.llmUrl}/v1/chat/completions`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(timeoutSec * 1000),
+        signal: cut && AbortSignal.any ? AbortSignal.any([timeout, cut.signal]) : timeout,
         body: JSON.stringify({ model: RITSU_CFG.llmModel, messages, temperature, max_tokens: 96 }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
@@ -424,11 +434,13 @@ class RitsuBrain {
       this.onStatus(sec > LLM_SLOW_SEC ? 'slow' : true);
       return reply;
     } catch (e) {
+      if (cut && cut.signal.aborted) return null;   // 話しかけられて打ち切った(LLM の調子は悪くない)
       console.warn('[brain] LLM error:', e);
       this.llmRestUntil = performance.now() + LLM_REST_SEC * 1000;
       this.onStatus(false);
       return null;
     } finally {
+      if (cut) this.sideRequests.delete(cut);
       if (!quiet) this.onQuery(--this.queries);
     }
   }
@@ -529,7 +541,7 @@ motion はつぶやきの内容に合うものを選ぶ(thinking ばかりにし
 最近言ったこと(同じ内容・言い回しは避ける):
 ${recent}`;
     const reply = await this._request([{ role: 'system', content: this._systemPrompt() },
-                                       { role: 'user', content: prompt }], 1.0);
+                                       { role: 'user', content: prompt }], 1.0, undefined, false, true);
     this.idleGenerating = false;
     const v = reply && validateReply(reply);
     if (this.busy || this.lastChat !== startedChat) return;   // 作っている間に会話が始まった
@@ -591,7 +603,7 @@ motion は次から選ぶ: ${motions.join(', ')}
     this.deciding = true;
     const reply = await this._request([{ role: 'system', content: this._systemPrompt() },
                                        ...(withHistory ? this.history.slice(-4) : []),
-                                       { role: 'user', content: prompt }], 0.9, DECIDE_TIMEOUT_SEC);
+                                       { role: 'user', content: prompt }], 0.9, DECIDE_TIMEOUT_SEC, false, true);
     this.deciding = false;
     if (this.busy || this.lastChat !== startedChat || this.ctx.visit !== visit) return null;
     const d = reply && parseDecision(reply, motions, allowWait);

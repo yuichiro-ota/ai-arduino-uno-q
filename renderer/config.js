@@ -31,11 +31,11 @@ window.RITSU_CONFIG = {
 
   // 声で話す(kiosk 画面のみ。文字起こし Whisper と音声合成 VOICEVOX は CT200 の voice-server)。null にすると声を使わない
   //   speaker/style: VOICEVOX の声 / speed: 話す速さ / volume: 音量(0〜1。スピーカー本体でも調整できる)
-  //   needPerson: カメラに人が映っている間だけ聞く(周りの話し声に答えないように)
+  //   needPerson: true でカメラに人が映っている間だけ聞く(周りの話し声に答えないように)。false はいつでも聞く
   //   idleAloud: 独り言も声に出す(false にすると、独り言はカメラに人が映っているときだけ声に出す) / listen: false で読み上げだけ(マイクを使わない)
   //   aizuchi: 話し終わった直後に「うんうん」などと相槌を打つ確率(0〜1)
   voice: { stt: '/stt', tts: '/tts', speaker: 'WhiteCUL', style: 'ノーマル', speed: 1.05, volume: 1.0,
-           needPerson: true, idleAloud: true, listen: true, aizuchi: 0.7 },
+           needPerson: false, idleAloud: true, listen: true, aizuchi: 0.7 },
 
   // 天気(Open-Meteo、APIキー不要)。設置場所の緯度・経度にする。null にすると天気を使わない
   //   UNO Q からインターネット(api.open-meteo.com)へ20分ごとに問い合わせる

@@ -19,8 +19,9 @@ const VOICE_NOISE_K = 3;           // 周りの雑音の何倍の大きさなら
 const FILLERS = { ack: ['うんうん', 'はい', 'なるほど', 'ふむふむ', 'うん'], think: ['えっと……', 'うーん、そうですね……'] };
 const VOICE_TAIL_SEC = 0.5;        // 律がしゃべり終えてから、この秒数はマイクを使わない(残響を拾わないように)
 // 無音や雑音から Whisper が作りがちな文(動画の締めの言葉など)。これだけなら捨てる
-// 「律ちゃん」の聞き違い(小さいモデルは「ただしちゃん」「りっちゃん」などと書く)を直す
-const NAME_FIX = /(りつ|リツ|りっ|リッ|ただし|立|率)(ちゃん|さん)/g;
+// 「律ちゃん」の聞き違い(小さいモデルは「ただしちゃん」などと書く)を直す。愛称の「りっちゃん」はそのまま(書き方だけそろえる)
+const NAME_FIX = /(りつ|リツ|ただし|立|率)(ちゃん|さん)/g;
+const NICKNAME_FIX = /(リッ|律っ|立っ)ちゃん/g;
 // 読み上げで VOICEVOX が読み間違える記号を、読み方に直す(字幕はそのまま)。「℃」は「ドシー」と読んでしまう
 const READ_FIX = [
   [/(?<![\dA-Za-z])[-−](?=\d)/g, 'マイナス'],       // -3℃ (「3-4」のような区切りはそのまま)
@@ -332,7 +333,7 @@ class RitsuVoice {
     const form = new FormData();
     form.append('file', new Blob([wav], { type: 'audio/wav' }), 'speech.wav');
     form.append('language', 'ja');
-    form.append('prompt', '律ちゃん、こんにちは。');   // 名前を「律」と書きやすくするヒント
+    form.append('prompt', '律ちゃん、りっちゃん、こんにちは。');   // 名前を「律」「りっちゃん」と書きやすくするヒント
     this.onState('recognizing');
     this.onRecognizing(true);
     let text = '';
@@ -340,7 +341,7 @@ class RitsuVoice {
       const res = await fetch(`${this.cfg.stt}/v1/audio/transcriptions`, { method: 'POST', body: form,
                                                                            signal: AbortSignal.timeout(15000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      text = ((await res.json()).text || '').trim().replace(NAME_FIX, '律$2');
+      text = ((await res.json()).text || '').trim().replace(NAME_FIX, '律$2').replace(NICKNAME_FIX, 'りっちゃん');
     } catch (e) {
       console.warn('[voice] STT error:', e);
       this.mic.error = { text: String(e), at: Date.now() };

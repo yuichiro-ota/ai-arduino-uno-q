@@ -53,6 +53,8 @@ const QUIET_RE = /静かに|しずかに|黙って|だまって|黙れ|だまれ
 const RESUME_RE = /(喋っ|しゃべっ|話し)て(も)?(いい|良い|大丈夫|OK|ok)|もう(いい|大丈夫)|(静かにし|黙ら)なくて(いい|大丈夫)|(しゃべ|喋)って$|お話しして/;
 const QUIET_LINES = ['はい、しばらく静かにしていますね。', 'わかりました。少しの間、静かにしていますね。'];
 const RESUME_LINES = ['ありがとうございます。またお話ししますね。', 'はい! またお話ししますね。'];
+// 愛称の「りっちゃん」は LLM へは「律ちゃん」として渡す(そのまま渡すと、小さいモデルは相手を「りっちゃん」と呼んでしまう)
+const NICKNAME_RE = /りっちゃん|リッちゃん|リッチャン/g;
 const REPLY_MAX_CHARS = 70;   // 字幕に収まる長さ(システムプロンプトでは60文字以内と指示)
 
 const SYSTEM_PROMPT = `あなたは「律(りつ)」。落ち着いた雰囲気だけど心優しい、可愛いバーチャルの女の子です。
@@ -373,7 +375,7 @@ class RitsuBrain {
 
     if (this.ctx.personPresent && this.visitLog.length === 0 && !this.ctx.isMaster) this._bumpToday('talked');
     this._log({ type: 'chat', len: userText.length, present: this.ctx.personPresent, master: this.ctx.isMaster });
-    const { text, motion, emotion, ok } = await this._complete(userText);
+    const { text, motion, emotion, ok } = await this._complete(userText.replace(NICKNAME_RE, '律ちゃん'));
     if (ok) this.visitLog = [...this.visitLog, [userText, text]].slice(-10);
     this.act({ text, motion, emotion, source: ok ? 'llm' : 'fallback' });
     this.lastInteraction = this.lastChat = performance.now();

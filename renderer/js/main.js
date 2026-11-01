@@ -14,6 +14,7 @@
  *   購読 /ritsu/memory         std_msgs/String  JSON 保存された記憶と反応の結果 (ritsu_memory.py)
  *   発行 /ritsu/memory_put     std_msgs/String  JSON {"key","value"} 覚えたことを保存 (kioskのみ)
  *   発行 /ritsu/log            std_msgs/String  JSON 来訪・反応・その結果の記録 (kioskのみ)
+ *   発行 /ritsu/turn           std_msgs/String  JSON {"reason","sec"} 台車ごと相手の方を向いてと頼む (kioskのみ)
  *   発行 /ritsu/enroll         std_msgs/String  JSON {"action":"add"|"clear"} マスターの顔の登録 (RITSU.enroll())
  *   声: voice.js が /stt (Whisper) で聞き取り、/tts (VOICEVOX) で読み上げる(kiosk 画面のみ)。聞き取った言葉は
  *       /ritsu/chat_user に from:"voice" で流す
@@ -333,6 +334,8 @@
       if (on) startThinking(); else endThinking();
       if (RITSU_CFG.kiosk) pubBool('/ritsu/thinking', on);
     },
+    // 台車ごと相手の方を向く(台車のノード ritsu_base が顔を見ながら回る。kiosk のみ)
+    onTurn: ({ reason }) => { if (RITSU_CFG.kiosk) pubJson('/ritsu/turn', { reason, sec: 8 }); },
     onQuery,
   });
   brain.ping();
@@ -368,7 +371,7 @@
     canListen: () => !brain.busy && (!RITSU_CFG.voice.needPerson || ctx.personPresent),
     onText: text => {
       if (chatOverRos()) pubJson('/ritsu/chat_user', { text, from: 'voice' });
-      else brain.chat(text);
+      else brain.chat(text, { from: 'voice' });
       setTimeout(() => { if (brain.busy && voice.filler('think')) player.play('thinking'); }, THINK_FILLER_SEC * 1000);
     },
     onRecognizing: on => { if (on) startThinking(); else if (!brain.busy) endThinking(); },
@@ -415,7 +418,7 @@
       ros.sub('/ritsu/chat_user', 'std_msgs/String', m => {
         let msg;
         try { msg = JSON.parse(m.data); } catch { msg = { text: m.data }; }   // 素の文字列でも受け付ける
-        if (typeof msg.text === 'string') brain.chat(msg.text.slice(0, 200));
+        if (typeof msg.text === 'string') brain.chat(msg.text.slice(0, 200), { from: msg.from });
       });
     }
     ros.sub('/ritsu/tilt', 'geometry_msgs/Vector3', m => onTilt(m.x));

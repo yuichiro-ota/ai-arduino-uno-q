@@ -83,4 +83,7 @@ services:
       - WHEEL_INVERT=${WHEEL_INVERT:-1,0,1,0}       # 向きが逆の車輪を 1 に(左前,右前,左後,右後)
       - MAX_LINEAR=${MAX_LINEAR:-0.3}               # [m/s]
       - MAX_ANGULAR=${MAX_ANGULAR:-1.2}             # [rad/s]
+      - TURN_ENABLE=${TURN_ENABLE:-1}               # 律が反応するとき台車ごと人の方を向く(/remote でも切り替えられる)
+      - TURN_MAX=${TURN_MAX:-0.4}                   # [rad/s] 向くときの回る速さの上限(0.4 ≒ 1秒に23度)
+      - TURN_SIGN=${TURN_SIGN:-1}                   # 人から離れるように回ったら -1
     command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && exec python3 ritsu_base.py"]

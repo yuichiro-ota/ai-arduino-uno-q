@@ -10,9 +10,16 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
                     CMD_TIMEOUT_SEC 来なければ止まる。速さは MAX_LINEAR / MAX_ANGULAR まで
   /ritsu/base_test  std_msgs/String  JSON {"wheel":0-3, "pwm":-255〜255, "sec":1}
                     1輪だけ PWM を直接出す(配線と向きの確かめ用。0=左前 1=右前 2=左後 3=右後)
+  /ritsu/turn       std_msgs/String  JSON {"reason":"greet", "sec":8}  人の方を向いてと頼む(画面の律が反応するときに送る)
+                    /ritsu/person の顔の左右のずれを見ながらその場で回り、正面(TURN_DONE_DEG 以内)で止まる。
+                    ずれが TURN_START_DEG 以内なら回らない(目線だけで足りる)。顔を見失う・sec 秒たつ・
+                    /cmd_vel(手の操作)が来たらやめる
+  /ritsu/turn_enable  std_msgs/Bool  人の方を向くか(/remote の切り替え)
+  /ritsu/person     geometry_msgs/PointStamped  顔の位置(光学座標系 x:右 z:前)
 発行トピック:
   /odom             nav_msgs/Odometry  frame odom / child base_link
-  /ritsu/base_status  std_msgs/String  JSON {"ok":bool, "error":"...", "fault":[...], "enc_b":[...], "speed":[4輪 m/s], "cmd":[vx,vy,wz]}
+  /ritsu/base_status  std_msgs/String  JSON {"ok":bool, "error":"...", "fault":[...], "enc_b":[...], "speed":[4輪 m/s], "cmd":[vx,vy,wz],
+                                                "turn":"向いている理由" or null, "turn_enable":bool}
                     enc_b は向きを B相で読めている車輪(最初に少し回すと決まる)
 
 環境変数:
@@ -23,6 +30,9 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
   WHEEL_INVERT    向きが逆の車輪を 1 に。左前,右前,左後,右後 (default 1,0,1,0: 律の台車の配線で前へ進む向き)
   PULSES_PER_REV  車輪1回転のパルス数 (default 440 = 11ライン × 減速1:40、A相の立ち上がり)
   MAX_LINEAR      [m/s] (default 0.3)   MAX_ANGULAR [rad/s] (default 1.2)
+  TURN_ENABLE     人の方を向くか(起動時。/remote で切り替えられる) (default 1)
+  TURN_MAX        向くときの回る速さの上限 [rad/s] (default 0.4 ≒ 1秒に23度)
+  TURN_SIGN       向く向きが逆(人から離れるように回る)なら -1 (default 1)
 """
 import json
 import math
@@ -32,9 +42,9 @@ import time
 
 import msgpack
 import rclpy
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PointStamped, Twist
 from nav_msgs.msg import Odometry
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 
 ROUTER_SOCK = os.environ.get("ROUTER_SOCK", "/var/run/arduino-router.sock")
 WHEEL_R = float(os.environ.get("WHEEL_DIAMETER", "0.08")) / 2
@@ -43,6 +53,15 @@ INVERT = [-1 if s.strip() == "1" else 1 for s in os.environ.get("WHEEL_INVERT", 
 PPR = float(os.environ.get("PULSES_PER_REV", "440"))
 MAX_LINEAR = float(os.environ.get("MAX_LINEAR", "0.3"))
 MAX_ANGULAR = float(os.environ.get("MAX_ANGULAR", "1.2"))
+TURN_ENABLE = os.environ.get("TURN_ENABLE", "1") != "0"
+TURN_MAX = float(os.environ.get("TURN_MAX", "0.4"))
+TURN_SIGN = -1.0 if os.environ.get("TURN_SIGN", "1").strip() == "-1" else 1.0
+TURN_MIN = 0.2                       # [rad/s] これより遅いと動き出さない
+TURN_GAIN = 1.2                      # ずれ [rad] に掛けて回る速さにする(ずれが小さいほどゆっくり)
+TURN_START_DEG = 10                  # 頼まれたとき、ずれがこれ以内なら回らない
+TURN_DONE_DEG = 5                    # これ以内に入ったら止まる
+TURN_LOST_SEC = 1.0                  # 顔をこれだけ見失ったらやめる
+TURN_SEC_MAX = 15
 RATE_HZ = 20
 CMD_TIMEOUT_SEC = 0.5
 STATUS_EVERY = 10                    # base_status は RATE_HZ の何回に1回
@@ -97,12 +116,56 @@ def main():
     status_pub = node.create_publisher(String, "/ritsu/base_status", 10)
     router = Router(ROUTER_SOCK)
     st = {"cmd": (0.0, 0.0, 0.0), "cmd_at": 0.0, "test": None, "last": None, "x": 0.0, "y": 0.0, "th": 0.0,
-          "speed": [0.0] * 4, "fault": 0, "enc_b": 0, "ok": False, "error": "", "n": 0, "t": time.monotonic()}
+          "speed": [0.0] * 4, "fault": 0, "enc_b": 0, "ok": False, "error": "", "n": 0, "t": time.monotonic(),
+          "person": None, "turn": None, "turn_enable": TURN_ENABLE}
 
     def on_cmd(msg):
         st["cmd"] = (clamp(msg.linear.x, MAX_LINEAR), clamp(msg.linear.y, MAX_LINEAR), clamp(msg.angular.z, MAX_ANGULAR))
         st["cmd_at"] = time.monotonic()
         st["test"] = None
+        st["turn"] = None                # 手の操作を優先する
+
+    def on_person(msg):
+        if msg.point.z > 0:
+            st["person"] = (msg.point.x, msg.point.z, time.monotonic())
+
+    def on_turn(msg):
+        try:
+            m = json.loads(msg.data)
+            reason, sec = str(m.get("reason", ""))[:20], min(TURN_SEC_MAX, float(m.get("sec", 8)))
+        except (ValueError, TypeError, AttributeError):
+            return
+        p = st["person"]
+        if not st["turn_enable"] or st["test"] or time.monotonic() - st["cmd_at"] < 1.0:
+            return
+        if not p or time.monotonic() - p[2] > TURN_LOST_SEC:
+            return
+        if abs(math.degrees(math.atan2(p[0], p[1]))) <= TURN_START_DEG:
+            return                       # ほぼ正面: 目線だけで足りる
+        st["turn"] = {"reason": reason, "until": time.monotonic() + sec}
+        node.get_logger().info(f"人の方を向く: {reason} ({math.degrees(math.atan2(p[0], p[1])):+.0f}度)")
+
+    def on_turn_enable(msg):
+        st["turn_enable"] = bool(msg.data)
+        if not msg.data:
+            st["turn"] = None
+        node.get_logger().info(f"人の方を向く: {'する' if msg.data else 'しない'}")
+
+    def turn_cmd():
+        """人の方を向いている間の回る速さ [rad/s]。向き終わった・やめたら None"""
+        t, p, now = st["turn"], st["person"], time.monotonic()
+        if not t:
+            return None
+        if now > t["until"] or not p or now - p[2] > TURN_LOST_SEC:
+            st["turn"] = None
+            return None
+        angle = math.atan2(p[0], p[1])   # 右にいるほど正
+        if abs(math.degrees(angle)) <= TURN_DONE_DEG:
+            node.get_logger().info(f"向き終わった: {t['reason']}")
+            st["turn"] = None
+            return None
+        wz = min(TURN_MAX, max(TURN_MIN, TURN_GAIN * abs(angle)))
+        return -math.copysign(wz, angle) * TURN_SIGN   # 右にいたら右回り(angular.z は左回りが正)
 
     def on_test(msg):
         try:
@@ -119,6 +182,9 @@ def main():
         """cmd_vel → 4輪の速さ [パルス/秒](上から見てローラーが X 字に並ぶメカナムの付け方)"""
         if time.monotonic() - st["cmd_at"] > CMD_TIMEOUT_SEC:
             st["cmd"] = (0.0, 0.0, 0.0)
+            turn = turn_cmd()
+            if turn is not None:
+                st["cmd"] = (0.0, 0.0, turn)
         vx, vy, wz = st["cmd"]
         v = (vx - vy - LXY * wz, vx + vy + LXY * wz, vx + vy - LXY * wz, vx - vy + LXY * wz)
         return [int(round(v[i] / M_PER_PULSE)) * INVERT[i] for i in range(4)]
@@ -179,13 +245,17 @@ def main():
             "fault": [WHEELS[i] for i in range(4) if st["fault"] & (1 << i)],
             "enc_b": [WHEELS[i] for i in range(4) if st["enc_b"] & (1 << i)],   # 向きを B相で読めている車輪
             "cmd": [round(c, 2) for c in st["cmd"]], "test": WHEELS[st["test"][0]] if st["test"] else None,
+            "turn": st["turn"]["reason"] if st["turn"] else None, "turn_enable": st["turn_enable"],
         }, ensure_ascii=False)))
 
     node.create_subscription(Twist, "/cmd_vel", on_cmd, 10)
     node.create_subscription(String, "/ritsu/base_test", on_test, 10)
+    node.create_subscription(PointStamped, "/ritsu/person", on_person, 10)
+    node.create_subscription(String, "/ritsu/turn", on_turn, 10)
+    node.create_subscription(Bool, "/ritsu/turn_enable", on_turn_enable, 10)
     node.create_timer(1.0 / RATE_HZ, tick)
     node.get_logger().info(f"台車: 車輪 直径{WHEEL_R * 2:.3f}m 向き{INVERT} 最大 {MAX_LINEAR}m/s {MAX_ANGULAR}rad/s "
-                           f"ソケット {ROUTER_SOCK}")
+                           f"ソケット {ROUTER_SOCK} 人の方を向く {'する' if TURN_ENABLE else 'しない'}(最大 {TURN_MAX}rad/s)")
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, Exception):

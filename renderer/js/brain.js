@@ -219,6 +219,8 @@ const IDLE_MOTIONS_ONLY = ['nodSlow', 'lookAround', 'tiltR', 'stretch', 'happyBo
                            'guruguru', 'twirl'];
 
 /* ---- LLM に決めさせる反応 ---- */
+// 台車ごと相手の方を向く反応(律が反応すると決めたときだけ。「何もしない」を選んだ・静かにしているときは向かない)
+const TURN_REACTIONS = new Set(['greet', 'greet_master', 'identify_master', 'approach', 'eye', 'linger', 'far']);
 const DECIDE_TIMEOUT_SEC = 4;   // これより遅ければ用意したセリフで反応する(反応が遅れると不自然なので)
 const GREET_MOTIONS = ['wave', 'ojigiKawaii', 'bow', 'comeHere', 'happyBounce', 'greetIdol'];
 const REACT_MOTIONS = ['wink', 'nod', 'tiltL', 'tiltR', 'happyBounce', 'shy', 'mojimoji', 'wave', 'peace', 'kyun', 'laugh'];
@@ -351,9 +353,11 @@ class RitsuBrain {
    *  onThinking(on) で返事を考え中かどうかを通知。ctx は RitsuContext(今の状況) */
   /** persist: { put(key, value), log(obj) } — 記憶と反応の記録を ROS 2 の memory ノードへ送る(kiosk 画面だけ)
    *  onQuery(n) — LLM に問い合わせ中の数(独り言・反応も含む。会話の要約は含まない)が変わったとき */
-  /** onInterrupt() — 話しかけられた(しゃべっている独り言などを止める) */
-  constructor({ act, onStatus, onThinking, onQuery, onInterrupt, ctx, persist }) {
+  /** onInterrupt() — 話しかけられた(しゃべっている独り言などを止める)
+   *  onTurn({reason}) — 台車ごと相手の方を向いてほしい(台車のノードが顔を見ながら回る) */
+  constructor({ act, onStatus, onThinking, onQuery, onInterrupt, onTurn, ctx, persist }) {
     this.onInterrupt = onInterrupt || (() => {});
+    this.onTurn = onTurn || (() => {});
     this.sideRequests = new Set();   // 独り言・反応の LLM 問い合わせ(話しかけられたら打ち切る)
     // 静かにしている間は、自分から言うセリフ(独り言・反応 = source が idle〜)を言わず、動きだけにする
     this.act = a => act(this.quiet && a.text && String(a.source).startsWith('idle') ? { ...a, text: null } : a);
@@ -398,9 +402,11 @@ class RitsuBrain {
     this.ctx.on('touch', (dir, hand) => this._onTouch(dir, hand));
   }
 
-  async chat(userText) {
+  /** from: 'voice' なら声で話しかけられた(目の前の人なので、そちらを向く) */
+  async chat(userText, { from } = {}) {
     userText = userText.trim();
     if (!userText) return;
+    if (from === 'voice') this._turn('voice');
     if (this.busy) {
       if (this.queue.length < QUEUE_MAX) this.queue.push(userText);
       return;
@@ -434,6 +440,12 @@ class RitsuBrain {
 
   /** 静かにしている間(QUIET_SEC 秒)か */
   get quiet() { return performance.now() < this.quietUntil; }
+
+  /** 台車ごと目の前の人の方を向く(静かにしている間・人がいないときは向かない) */
+  _turn(reason) {
+    if (this.quiet || !this.ctx.personPresent) return;
+    this.onTurn({ reason });
+  }
 
   /** sec 秒静かにする(0 で取り消す) */
   setQuiet(sec = QUIET_SEC) {
@@ -662,12 +674,17 @@ motion は次から選ぶ: ${motions.join(', ')}
 
   /** _decide の結果を演じて記録する */
   async _react(reaction, situation, opts) {
-    if (opts.reflexMotion) this.act({ motion: opts.reflexMotion, emotion: opts.fallback[1] });
+    const turn = TURN_REACTIONS.has(reaction);
+    if (opts.reflexMotion) {
+      this.act({ motion: opts.reflexMotion, emotion: opts.fallback[1] });
+      if (turn) this._turn(reaction);            // すぐ動く反応は向くのも待たない
+    }
     const d = await this._decide(situation, opts);
     if (!d) return;
     this._log({ type: 'react', reaction, arm: opts.arm || null, by: d.by, act: d.wait ? 'wait' : d.text ? 'say' : 'motion',
                 master: this.ctx.isMaster });
     if (d.wait) return;
+    if (turn && !opts.reflexMotion) this._turn(reaction);
     this.act({ text: d.text, motion: d.motion, emotion: d.emotion, source: d.by === 'llm' ? 'idle-llm' : 'idle' });
   }
 
@@ -726,6 +743,7 @@ motion は次から選ぶ: ${motions.join(', ')}
     }
     if (this.absentSec < 60) {
       this.act({ text: 'おかえりなさい。', motion: 'wave', emotion: 'happy', source: 'idle' });
+      this._turn('greet');
       return;
     }
     const style = this._pickArm('greet', Object.keys(GREET_STYLES));

@@ -159,6 +159,8 @@ sudo reboot
 | `/ritsu/log` | `std_msgs/String` | 画面の律（kiosk） → 記憶 | JSON 来訪・反応・その結果の記録（`data/log/日付.jsonl` に追記） |
 | `/cmd_vel` | `geometry_msgs/Twist` | 入力ページ（など） → 台車 | `linear.x` 前 [m/s]・`linear.y` 左 [m/s]・`angular.z` 左回り [rad/s]。0.5秒来なければ止まる |
 | `/odom` | `nav_msgs/Odometry` | 台車 → | エンコーダーから求めた動いた量（`odom` → `base_link`） |
+| `/ritsu/turn` | `std_msgs/String` | 画面の律（kiosk）・入力ページ → 台車 | JSON `{"reason":"greet","sec":8}` 台車ごと人の方を向く |
+| `/ritsu/turn_enable` | `std_msgs/Bool` | 入力ページ → 台車 | 人の方を向くか |
 | `/ritsu/base_test` | `std_msgs/String` | 入力ページ → 台車 | JSON `{"wheel":0-3,"pwm":120,"sec":1}` 1輪だけ回す（配線・向きの確認） |
 | `/ritsu/base_status` | `std_msgs/String` | 台車 → 入力ページ | JSON `{"ok":true,"error":"","fault":[],"enc_b":[B相で向きを読めている車輪],"speed":[4輪 m/s],"cmd":[vx,vy,wz]}` 0.5秒ごと |
 
@@ -246,7 +248,13 @@ Linux 側の `base` サービス（`ros/ritsu_base.py`）が `/cmd_vel` を4輪�
 3. 台車を浮かせて、`/remote` の「動かす」→「1輪ずつ試す」で各車輪が前へ進む向きに回るか確かめる。違う車輪が回ったら配線を、逆に回ったら `.env` の `WHEEL_INVERT`（左前,右前,左後,右後。既定 `1,0,1,0`）を直す
 4. 十字ボタンを押している間だけ動く（↺↻ はその場で回る）。離すか画面を閉じると止まり、指令が0.5秒届かなければ台車側でも止まる
 
-- 環境変数: `WHEEL_DIAMETER`（車輪の直径、既定 0.08m）、`WHEEL_LX` / `WHEEL_LY`（車体の中心から前後の軸・左右の車輪まで、既定 0.10m / 0.12m）。実測して `.env` に書くと `/odom` が正確になる。`MAX_LINEAR` / `MAX_ANGULAR`（速さの上限、既定 0.3m/s / 1.2rad/s）
+**人の方を向く**: 律が反応すると決めたとき（挨拶・目が合った・近づいてきた・マスターが来た・しばらく居てくれる人への声かけ・のぞき込み）と、声で話しかけられたときに、台車がその場で回って相手を正面にとらえる（`/ritsu/turn`）。
+- 台車のノードが深度カメラの顔の位置（`/ritsu/person`）を見ながら回り、正面から 5度以内に入ったら止まる。頼まれたときのずれが 10度以内なら回らない（目線だけで追う）
+- 律が「何もしない」を選んだとき、静かにしているとき、`/remote` から話しかけたとき（目の前の人とは限らない）は向かない
+- 顔を見失う・8秒たつ・十字ボタンで動かすとやめる。回る速さは最大 0.4rad/s（約23度/秒、`TURN_MAX`）
+- `/remote` の「動かす」の「人の方を向く」で切り替え、「こっちを向いて」で試せる。人から離れるように回るときは `.env` に `TURN_SIGN=-1`
+
+- 環境変数: `TURN_ENABLE`（人の方を向くか、既定 1）・`TURN_MAX`・`TURN_SIGN`、`WHEEL_DIAMETER`（車輪の直径、既定 0.08m）、`WHEEL_LX` / `WHEEL_LY`（車体の中心から前後の軸・左右の車輪まで、既定 0.10m / 0.12m）。実測して `.env` に書くと `/odom` が正確になる。`MAX_LINEAR` / `MAX_ANGULAR`（速さの上限、既定 0.3m/s / 1.2rad/s）
 - arduino-router のソケットは `/var/run/arduino-router.sock` を想定（違うときは compose の `volumes` と `ROUTER_SOCK` を直す）
 
 ## デバッグ

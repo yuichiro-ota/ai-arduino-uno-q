@@ -43,6 +43,14 @@ const TALK_MOTIONS = ['wave', 'bigWave', 'bow', 'nod', 'shakeNo', 'happyBounce',
 const LLM_SLOW_SEC = 8;       // 返事にこれより時間がかかったら、LLM が混んでいるとみなす
 const LLM_REST_SEC = 90;      // 混んでいる・失敗したとき、独り言と反応で LLM を使わない秒数(会話は使う)
 const NEWS_RE = /ニュース|話題|最近|何かあった|世の中|出来事/;   // ニュースの見出しをプロンプトに入れる話しかけ
+// 「静かに」「黙って」と言われたら QUIET_SEC 秒は自分からしゃべらない(動きと、話しかけられたときの返事は続ける)。
+// 「話していいよ」などで取り消す。長い話の途中の言葉には反応しないよう、QUIET_MAX_CHARS 文字までの話しかけだけ見る
+const QUIET_SEC = 300;
+const QUIET_MAX_CHARS = 20;
+const QUIET_RE = /静かに|しずかに|黙って|だまって|黙れ|だまれ|うるさい|しーっ|シーッ|(喋|しゃべ|話)らないで/;
+const RESUME_RE = /(喋っ|しゃべっ|話し)て(も)?(いい|良い|大丈夫|OK|ok)|もう(いい|大丈夫)|(静かにし|黙ら)なくて(いい|大丈夫)|(しゃべ|喋)って$|お話しして/;
+const QUIET_LINES = ['はい、しばらく静かにしていますね。', 'わかりました。少しの間、静かにしていますね。'];
+const RESUME_LINES = ['ありがとうございます。またお話ししますね。', 'はい! またお話ししますね。'];
 const REPLY_MAX_CHARS = 70;   // 字幕に収まる長さ(システムプロンプトでは60文字以内と指示)
 
 const SYSTEM_PROMPT = `あなたは「律(りつ)」。落ち着いた雰囲気だけど心優しい、可愛いバーチャルの女の子です。
@@ -306,7 +314,9 @@ class RitsuBrain {
   /** persist: { put(key, value), log(obj) } — 記憶と反応の記録を ROS 2 の memory ノードへ送る(kiosk 画面だけ)
    *  onQuery(n) — LLM に問い合わせ中の数(独り言・反応も含む。会話の要約は含まない)が変わったとき */
   constructor({ act, onStatus, onThinking, onQuery, ctx, persist }) {
-    this.act = act;
+    // 静かにしている間は、自分から言うセリフ(独り言・反応 = source が idle〜)を言わず、動きだけにする
+    this.act = a => act(this.quiet && a.text && String(a.source).startsWith('idle') ? { ...a, text: null } : a);
+    this.quietUntil = 0;
     this.onQuery = onQuery || (() => {});
     this.queries = 0;
     this.llmRestUntil = 0;       // この時刻までは独り言と反応で LLM を使わない(混んでいる・失敗した)
@@ -352,6 +362,7 @@ class RitsuBrain {
       if (this.queue.length < QUEUE_MAX) this.queue.push(userText);
       return;
     }
+    if (this._quietCommand(userText)) return;
     this.busy = true;
     this.lastChat = performance.now();
     this.onThinking(true);
@@ -367,6 +378,28 @@ class RitsuBrain {
     this.busy = false;
     this.onThinking(false);
     if (this.queue.length) this.chat(this.queue.shift());
+  }
+
+  /** 静かにしている間(QUIET_SEC 秒)か */
+  get quiet() { return performance.now() < this.quietUntil; }
+
+  /** sec 秒静かにする(0 で取り消す) */
+  setQuiet(sec = QUIET_SEC) {
+    this.quietUntil = sec > 0 ? performance.now() + sec * 1000 : 0;
+    this._log({ type: 'quiet', sec });
+  }
+
+  /** 「静かに」「話していいよ」への返事(LLM を使わずすぐ答える)。そうだったら true */
+  _quietCommand(userText) {
+    if (userText.length > QUIET_MAX_CHARS) return false;
+    const resume = RESUME_RE.test(userText);    // 「静かにしなくていいよ」も先にこちらで見る
+    if (resume ? !this.quiet : !QUIET_RE.test(userText)) return false;   // 静かにしていないときの「話していいよ」は普通の会話
+    this.setQuiet(resume ? 0 : QUIET_SEC);
+    const text = pick(resume ? RESUME_LINES : QUIET_LINES);
+    this.history = [...this.history, { role: 'user', content: userText }, { role: 'assistant', content: text }].slice(-12);
+    this.act({ text, motion: resume ? 'happyBounce' : 'nod', emotion: resume ? 'happy' : 'neutral', source: 'llm' });
+    this.lastInteraction = this.lastChat = performance.now();
+    return true;
   }
 
   /** LiteLLM へ問い合わせて返答の本文を返す。失敗したら null */
@@ -448,7 +481,7 @@ class RitsuBrain {
         } else if (!this.busy && !this.deciding && quietSec > RITSU_CFG.idleMinSec && sincePeek > 8) {   // のぞき込み直後は控える
           const notice = text => this.act({ motion: Math.random() < 0.5 ? 'noticeL' : 'noticeR',
                                             emotion: 'surprised', text, source: 'idle' });
-          if (Math.random() < RITSU_CFG.idleSpeakChance) {          // しゃべる
+          if (!this.quiet && Math.random() < RITSU_CFG.idleSpeakChance) {   // しゃべる(静かにしている間は動きだけ)
             if (Math.random() < RITSU_CFG.llmIdleChance) this._llmIdleLine();
             else if (Math.random() < NOTICE_CHANCE) notice(NOTICE_LINES[Math.floor(Math.random() * NOTICE_LINES.length)]);
             else {
@@ -539,7 +572,7 @@ ${recent}`;
       const [motion, emotion, text] = fallback;
       return { motion: reflexMotion ? null : motion, emotion, text, by: 'template' };
     };
-    if (!RITSU_CFG.llmReact || !this._llmFree()) return useFallback();
+    if (!RITSU_CFG.llmReact || !this._llmFree() || this.quiet) return useFallback();   // 静かにしている間はセリフを言わないので LLM も使わない
     const startedChat = this.lastChat;
     const visit = this.ctx.visit;
     const forms = ['- 話しかける: [emotion:名前][motion:名前] セリフ(1〜2文、40文字以内)'];

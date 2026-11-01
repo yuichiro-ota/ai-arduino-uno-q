@@ -489,6 +489,7 @@
       setTimeout(() => clearInterval(t), sec * 1000);
     },
     speak: text => brain.act({ text, motion: 'talkGesture1', emotion: 'happy', source: 'llm' }),
+    quiet: (sec = 300) => brain.setQuiet(sec),   // 静かにさせる(0 で取り消す)
     act: motion => brain.act({ motion }),
   };
 })();

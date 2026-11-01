@@ -160,7 +160,7 @@ sudo reboot
 | `/cmd_vel` | `geometry_msgs/Twist` | 入力ページ（など） → 台車 | `linear.x` 前 [m/s]・`linear.y` 左 [m/s]・`angular.z` 左回り [rad/s]。0.5秒来なければ止まる |
 | `/odom` | `nav_msgs/Odometry` | 台車 → | エンコーダーから求めた動いた量（`odom` → `base_link`） |
 | `/ritsu/base_test` | `std_msgs/String` | 入力ページ → 台車 | JSON `{"wheel":0-3,"pwm":120,"sec":1}` 1輪だけ回す（配線・向きの確認） |
-| `/ritsu/base_status` | `std_msgs/String` | 台車 → 入力ページ | JSON `{"ok":true,"error":"","fault":[],"speed":[4輪 m/s],"cmd":[vx,vy,wz]}` 0.5秒ごと |
+| `/ritsu/base_status` | `std_msgs/String` | 台車 → 入力ページ | JSON `{"ok":true,"error":"","fault":[],"enc_b":[B相で向きを読めている車輪],"speed":[4輪 m/s],"cmd":[vx,vy,wz]}` 0.5秒ごと |
 
 - `/ritsu/chat_user` に応答するのは、URL に `?kiosk=1` を付けて開いた画面（キオスク表示）だけです。PC などで `index.html` を開いて確認しても、二重に返事をしません。
 - ROS 2 のコマンドで試す例: `docker exec -it ritsu-camera bash -c "source /opt/ros/jazzy/setup.bash && ros2 topic echo /ritsu/person"`
@@ -221,14 +221,16 @@ docker logs -f ritsu-camera               # 検出状況が5秒ごとに出る
 UNO Q の STM32 が L298N 2枚で Yahboom 520 エンコーダーモーター（12V・減速1:40・300rpm・ホール式 11ライン）を4個動かし、
 Linux 側の `base` サービス（`ros/ritsu_base.py`）が `/cmd_vel` を4輪の速さに直して Bridge（arduino-router）経由で送ります。
 
-**配線**（EN は PWM のピン。エンコーダーは A相だけ使う）
+**配線**（EN は PWM のピン。L298N の1枚目が左側、2枚目が右側で、どちらも A 側が前輪・B 側が後輪）
 
-| 車輪 | EN | IN1 / IN2 | エンコーダー A相 |
-|---|---|---|---|
-| 左前 | D3 | D2 / D4 | D10 |
-| 右前 | D5 | D7 / D8 | D11 |
-| 左後 | D6 | A0 / A1 | D12 |
-| 右後 | D9 | A2 / A3 | D13 |
+| 車輪 | L298N | EN | IN | エンコーダー A相 / B相 |
+|---|---|---|---|---|
+| 左前 | ① ENA・IN1/IN2・OUT1/OUT2 | D3 | D2 / D4 | D10 / A4 |
+| 左後 | ① ENB・IN3/IN4・OUT3/OUT4 | D6 | A0 / A1 | D12 / D0 |
+| 右前 | ② ENA・IN1/IN2・OUT1/OUT2 | D5 | D7 / D8 | D11 / A5 |
+| 右後 | ② ENB・IN3/IN4・OUT3/OUT4 | D9 | A2 / A3 | D13 / D1 |
+
+- 回った向きは B相で読む。B相の極性は最初に少し回したときに自動で合わせ、読めない車輪は回した向きとみなす（`/remote` の「動かす」に「B相 左前・…」と読めている車輪が出る）
 
 - バッテリーの −・L298N 2枚の GND・UNO Q の GND を必ずつなぐ。L298N の 5V 出力は UNO Q につながない（UNO Q は USB-C から給電）
 - エンコーダーの電源は UNO Q の **3.3V** から取る（5V だと信号も 5V になり、UNO Q のピンを傷める）

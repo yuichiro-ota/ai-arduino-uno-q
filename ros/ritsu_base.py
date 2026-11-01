@@ -12,7 +12,8 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
                     1輪だけ PWM を直接出す(配線と向きの確かめ用。0=左前 1=右前 2=左後 3=右後)
 発行トピック:
   /odom             nav_msgs/Odometry  frame odom / child base_link
-  /ritsu/base_status  std_msgs/String  JSON {"ok":bool, "error":"...", "fault":[...], "speed":[4輪 m/s], "cmd":[vx,vy,wz]}
+  /ritsu/base_status  std_msgs/String  JSON {"ok":bool, "error":"...", "fault":[...], "enc_b":[...], "speed":[4輪 m/s], "cmd":[vx,vy,wz]}
+                    enc_b は向きを B相で読めている車輪(最初に少し回すと決まる)
 
 環境変数:
   ROUTER_SOCK     arduino-router のソケット (default /var/run/arduino-router.sock)
@@ -96,7 +97,7 @@ def main():
     status_pub = node.create_publisher(String, "/ritsu/base_status", 10)
     router = Router(ROUTER_SOCK)
     st = {"cmd": (0.0, 0.0, 0.0), "cmd_at": 0.0, "test": None, "last": None, "x": 0.0, "y": 0.0, "th": 0.0,
-          "speed": [0.0] * 4, "fault": 0, "ok": False, "error": "", "n": 0, "t": time.monotonic()}
+          "speed": [0.0] * 4, "fault": 0, "enc_b": 0, "ok": False, "error": "", "n": 0, "t": time.monotonic()}
 
     def on_cmd(msg):
         st["cmd"] = (clamp(msg.linear.x, MAX_LINEAR), clamp(msg.linear.y, MAX_LINEAR), clamp(msg.angular.z, MAX_ANGULAR))
@@ -132,7 +133,8 @@ def main():
             else:
                 st["test"] = None
                 res = router.call("base_set", wheel_targets())
-            *pulses, fault = [int(s) for s in str(res).split(",")]
+            vals = [int(s) for s in str(res).split(",")]
+            pulses, fault, enc_b = vals[:4], vals[4], vals[5] if len(vals) > 5 else 0
             st["ok"], st["error"] = True, ""
         except (OSError, RuntimeError, ValueError) as e:
             if st["ok"] or not st["error"]:
@@ -146,7 +148,7 @@ def main():
             return
         now = time.monotonic()
         dt, st["t"] = now - st["t"], now
-        st["fault"] = fault
+        st["fault"], st["enc_b"] = fault, enc_b
         if st["last"] is not None and dt > 0:
             d = [(pulses[i] - st["last"][i]) * INVERT[i] * M_PER_PULSE for i in range(4)]   # 各輪の進んだ距離 [m]
             st["speed"] = [round(x / dt, 3) for x in d]
@@ -173,6 +175,7 @@ def main():
         status_pub.publish(String(data=json.dumps({
             "ok": st["ok"], "error": st["error"], "speed": st["speed"],
             "fault": [WHEELS[i] for i in range(4) if st["fault"] & (1 << i)],
+            "enc_b": [WHEELS[i] for i in range(4) if st["enc_b"] & (1 << i)],   # 向きを B相で読めている車輪
             "cmd": [round(c, 2) for c in st["cmd"]], "test": WHEELS[st["test"][0]] if st["test"] else None,
         }, ensure_ascii=False)))
 

@@ -1,0 +1,3 @@
+name: Ritsu Base
+description: 律の台車(メカナム4輪・L298N 2枚・Yahboom 520 エンコーダーモーター)を ROS 2 の ritsu_base ノードから動かす
+icon: 🚗

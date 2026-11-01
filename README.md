@@ -1,13 +1,14 @@
 # 律 (Ritsu) — Arduino UNO Q 版バーチャルキャラクター (VRM + three.js + ROS 2)
 
 VRMモデル「律」を Arduino UNO Q の画面に表示し、会話・視線追従・カメラの傾きへの反応を行います。
-センサーと画面のやり取りは **ROS 2 (Jazzy)** で行い、ブラウザ（画面の律・iPhone の入力ページ）は rosbridge 経由で ROS 2 につながります。将来、台車（メカナムホイール）のノードも同じ ROS 2 に足せます。
+センサーと画面のやり取りは **ROS 2 (Jazzy)** で行い、ブラウザ（画面の律・iPhone の入力ページ）は rosbridge 経由で ROS 2 につながります。台車（メカナム4輪）も同じ ROS 2 の `/cmd_vel` で動かします。
 
 ```
                      UNO Q (192.168.3.80)                                   CT201 (192.168.3.16)
 iPhone ─/remote─▶ nginx:8080 ─ /llm/* (+APIキー) ───────────────────▶ LiteLLM :4000 ─▶ Ollama
 (Safari)            └ /rosbridge ─▶ rosbridge :9090 ◀──ROS 2──▶ ritsu_perception (深度カメラ Gemini 335・顔の見分け)
                                         ▲             ◀──ROS 2──▶ ritsu_memory (記憶・反応の記録 → ./data)
+                                        │             ◀──ROS 2──▶ ritsu_base (台車) ─Bridge─▶ STM32 ─▶ L298N ×2 ─▶ モーター ×4
                          Chromium(kiosk) = 画面の律
 ```
 
@@ -45,12 +46,14 @@ iPhone ─/remote─▶ nginx:8080 ─ /llm/* (+APIキー) ───────
 
 | パス | 内容 |
 |---|---|
-| `docker-compose.yml` | `renderer`（nginx）、`rosbridge`、`perception`（人検出）、`memory`（記憶・反応の記録）。ROS 2 の3つはホストネットワーク + `ipc: host` |
+| `docker-compose.yml` | `renderer`（nginx）、`rosbridge`、`perception`（人検出）、`memory`（記憶・反応の記録）、`base`（台車）。ROS 2 のノードはホストネットワーク + `ipc: host` |
 | `.env` | **LiteLLM の接続先とAPIキー**（`.env.example` からコピー。配信されない場所にある） |
 | `nginx/default.conf.template` | 起動時に `.env` の値を埋め込む nginx 設定。`/llm/` を LiteLLM に中継してキーを付ける。`/rosbridge` を rosbridge に中継、`/remote` で入力ページを返す |
 | `ros/Dockerfile` | ROS 2 Jazzy のイメージ（rosbridge、Orbbec SDK、OpenCV、顔検出モデル YuNet、顔の見分けモデル SFace） |
 | `ros/ritsu_perception.py` | 人検出・傾き・マスターの顔の見分けの ROS 2 ノード |
 | `ros/ritsu_memory.py` | 記憶（`data/memory.json`）と反応の記録（`data/log/`）、ニュースの見出しの取得の ROS 2 ノード |
+| `ros/ritsu_base.py` | 台車の ROS 2 ノード（`/cmd_vel` → 4輪の速さ → STM32、エンコーダー → `/odom`） |
+| `arduino/ritsu-base/` | UNO Q の STM32 に書き込むスケッチ（App Lab のアプリの形。L298N 2枚・エンコーダー付きモーター4個の速さ制御） |
 | `data/` | 記憶・反応の記録・登録した顔の数値（UNO Q の中だけ。Git の管理外） |
 | `voice-server/` | CT200 に入れる声のサーバー: `stt_server.py`（faster-whisper の文字起こし :8100）と `setup-ct200.sh`（Whisper と VOICEVOX ENGINE を systemd サービスとして入れる） |
 | `renderer/js/voice.js` | マイクで聞く（区間の切り出し → /stt）・読み上げ（/tts）・口の動き |
@@ -154,6 +157,10 @@ sudo reboot
 | `/ritsu/memory` | `std_msgs/String` | 記憶 → 画面の律 | JSON 覚えていること `today` / `master`、反応の結果 `stats`、ニュースの見出し `news`。5秒ごと |
 | `/ritsu/memory_put` | `std_msgs/String` | 画面の律（kiosk） → 記憶 | JSON `{"key":"today/master","value":{...}}` |
 | `/ritsu/log` | `std_msgs/String` | 画面の律（kiosk） → 記憶 | JSON 来訪・反応・その結果の記録（`data/log/日付.jsonl` に追記） |
+| `/cmd_vel` | `geometry_msgs/Twist` | 入力ページ（など） → 台車 | `linear.x` 前 [m/s]・`linear.y` 左 [m/s]・`angular.z` 左回り [rad/s]。0.5秒来なければ止まる |
+| `/odom` | `nav_msgs/Odometry` | 台車 → | エンコーダーから求めた動いた量（`odom` → `base_link`） |
+| `/ritsu/base_test` | `std_msgs/String` | 入力ページ → 台車 | JSON `{"wheel":0-3,"pwm":120,"sec":1}` 1輪だけ回す（配線・向きの確認） |
+| `/ritsu/base_status` | `std_msgs/String` | 台車 → 入力ページ | JSON `{"ok":true,"error":"","fault":[],"speed":[4輪 m/s],"cmd":[vx,vy,wz]}` 0.5秒ごと |
 
 - `/ritsu/chat_user` に応答するのは、URL に `?kiosk=1` を付けて開いた画面（キオスク表示）だけです。PC などで `index.html` を開いて確認しても、二重に返事をしません。
 - ROS 2 のコマンドで試す例: `docker exec -it ritsu-camera bash -c "source /opt/ros/jazzy/setup.bash && ros2 topic echo /ritsu/person"`
@@ -208,6 +215,33 @@ docker logs -f ritsu-camera               # 検出状況が5秒ごとに出る
 - カメラから10秒映像が来なければ、自動で開き直します。
 - マスターの顔は、`http://192.168.3.80:8080/remote` の「マスター登録」→ カメラの正面で「登録」を押して約4秒じっとする、で登録します。眼鏡の有無・明るさ・少し違う向きで何回か登録すると見分けやすくなります（最大60枚分）。見分けは70px以上の大きさの、ほぼ正面の顔だけで、1秒に1回行います。ログの `id=master(0.62)` が見分けた結果と類似度です。入力ページは LAN 内の誰でも開けるので、登録ボタンも誰でも押せます。
 - 開発PC（WSL）で使うときは、Windows 側で usbipd-win を使ってカメラを WSL に渡します（`usbipd bind --busid <BUSID>` → `usbipd attach --wsl --busid <BUSID>`）。
+
+## 7. 台車（メカナム4輪）
+
+UNO Q の STM32 が L298N 2枚で Yahboom 520 エンコーダーモーター（12V・減速1:40・300rpm・ホール式 11ライン）を4個動かし、
+Linux 側の `base` サービス（`ros/ritsu_base.py`）が `/cmd_vel` を4輪の速さに直して Bridge（arduino-router）経由で送ります。
+
+**配線**（EN は PWM のピン。エンコーダーは A相だけ使う）
+
+| 車輪 | EN | IN1 / IN2 | エンコーダー A相 |
+|---|---|---|---|
+| 左前 | D3 | D2 / D4 | D10 |
+| 右前 | D5 | D7 / D8 | D11 |
+| 左後 | D6 | A0 / A1 | D12 |
+| 右後 | D9 | A2 / A3 | D13 |
+
+- バッテリーの −・L298N 2枚の GND・UNO Q の GND を必ずつなぐ。L298N の 5V 出力は UNO Q につながない（UNO Q は USB-C から給電）
+- エンコーダーの電源は UNO Q の **3.3V** から取る（5V だと信号も 5V になり、UNO Q のピンを傷める）
+- L298N は1チャンネル 2A まで、モーターはロックすると 4A 流れる。スケッチは PWM を 220 までにし、強く回しているのに1秒回らない車輪は止める
+
+**書き込みと起動**
+1. Arduino App Lab で `arduino/ritsu-base` をアプリとして開き（または新しいアプリに `sketch/sketch.ino` を貼り、ライブラリ `Arduino_RouterBridge` を足す）、実行して STM32 に書き込む
+2. `docker compose up -d --build base`。`docker logs -f ritsu-base` で「STM32 とつながらない」が出なければつながっている
+3. 台車を浮かせて、`/remote` の「動かす」→「1輪ずつ試す」で各車輪が前へ進む向きに回るか確かめる。違う車輪が回ったら配線を、逆に回ったら `.env` の `WHEEL_INVERT`（左前,右前,左後,右後。既定 `0,1,0,1`）を直す
+4. 十字ボタンを押している間だけ動く（↺↻ はその場で回る）。離すか画面を閉じると止まり、指令が0.5秒届かなければ台車側でも止まる
+
+- 環境変数: `WHEEL_DIAMETER`（車輪の直径、既定 0.08m）、`WHEEL_LX` / `WHEEL_LY`（車体の中心から前後の軸・左右の車輪まで、既定 0.10m / 0.12m）。実測して `.env` に書くと `/odom` が正確になる。`MAX_LINEAR` / `MAX_ANGULAR`（速さの上限、既定 0.3m/s / 1.2rad/s）
+- arduino-router のソケットは `/var/run/arduino-router.sock` を想定（違うときは compose の `volumes` と `ROUTER_SOCK` を直す）
 
 ## デバッグ
 

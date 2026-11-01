@@ -34,7 +34,12 @@
   #conn.on .dot { background: #57d9a3; box-shadow: 0 0 6px #57d9a3; }
   header .right { display: flex; align-items: center; gap: 6px; }
   header h1, header button { white-space: nowrap; }
-  @media (max-width: 440px) { #conn-text { display: none; } header h1 { font-size: 16px; } }   /* 狭い画面は「接続」の文字を出さず点だけ */
+  @media (max-width: 440px) {   /* 狭い画面は「接続」の文字を出さず点だけ。ボタンも詰める */
+    #conn-text { display: none; } header { padding-left: 12px; padding-right: 12px; } header h1 { font-size: 15px; letter-spacing: 0.02em; }
+    header .right { gap: 4px; } #master-btn, .hbtn { padding: 4px 6px; font-size: 11px; }
+    #master-btn .wide { display: none; }
+  }
+  @media (min-width: 441px) { #master-btn .narrow { display: none; } }
   #master-btn, .hbtn { border: 1px solid var(--sakura); background: #fff; color: var(--ink); border-radius: 999px;
                 padding: 4px 8px; font-size: 12px; }
 
@@ -76,6 +81,20 @@
   #mem .add button { flex-shrink: 0; border: none; background: var(--accent); color: #fff; border-radius: 999px;
                      padding: 0 14px; font-size: 14px; font-weight: 700; }
   #mem .hint { color: var(--muted); font-size: 12px; margin-top: 8px; line-height: 1.6; }
+
+  /* 台車を動かす(押している間だけ動く) */
+  #drive { display: none; padding: 12px 16px; background: #fff; border-bottom: 1px solid #f3e1e6; font-size: 13px; }
+  #drive.show { display: block; }
+  #drive .pad { display: grid; grid-template-columns: repeat(3, 64px); gap: 8px; justify-content: center; margin: 8px 0; }
+  #drive .pad button, #drive .wheels button { border: 2px solid var(--sakura); background: #fff; color: var(--ink); border-radius: 14px;
+                  font-size: 15px; font-weight: 700; height: 52px; touch-action: none; user-select: none; -webkit-user-select: none; }
+  #drive .pad button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #drive .pad .stop { background: #f3e1e6; }
+  #drive .speed { display: flex; gap: 8px; justify-content: center; align-items: center; }
+  #drive .wheels { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 8px; }
+  #drive .wheels button { height: 38px; font-size: 13px; }
+  #drive-state { color: var(--muted); margin-top: 8px; min-height: 1.6em; text-align: center; }
+  #drive .hint { color: var(--muted); font-size: 12px; margin-top: 6px; line-height: 1.6; }
 
   #log {
     flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px;
@@ -121,7 +140,8 @@
   <div class="right">
     <button id="mem-btn" class="hbtn" type="button">覚えたこと</button>
     <button id="mic-btn" class="hbtn" type="button">マイク</button>
-    <button id="master-btn" type="button">マスター登録</button>
+    <button id="drive-btn" class="hbtn" type="button">動かす</button>
+    <button id="master-btn" type="button"><span class="wide">マスター登録</span><span class="narrow">顔登録</span></button>
     <div id="conn"><div class="dot"></div><span id="conn-text">接続中…</span></div>
   </div>
 </header>
@@ -157,6 +177,22 @@
     <dt>失敗</dt><dd id="mic-error">-</dd>
     <dt>マイク</dt><dd id="mic-device">-</dd>
   </dl>
+</section>
+
+<section id="drive">
+  <div class="pad">
+    <button data-v="0,0,1">↺</button><button data-v="1,0,0">前</button><button data-v="0,0,-1">↻</button>
+    <button data-v="0,1,0">左</button><button class="stop" data-v="0,0,0">止</button><button data-v="0,-1,0">右</button>
+    <span></span><button data-v="-1,0,0">後</button><span></span>
+  </div>
+  <div class="speed">速さ <label><input type="radio" name="spd" value="0.1" checked> ゆっくり</label>
+    <label><input type="radio" name="spd" value="0.2"> ふつう</label></div>
+  <div id="drive-state">台車からの知らせを待っています…</div>
+  <details><summary class="hint">1輪ずつ試す(配線・向きの確認)</summary>
+    <div class="wheels"><button data-w="0">左前</button><button data-w="1">右前</button><button data-w="2">左後</button><button data-w="3">右後</button></div>
+    <div class="hint">押すと、その車輪だけ1秒「前へ進む向き」に回します。台車を浮かせて試してください。
+      違う車輪が回ったら配線を、逆に回ったら .env の WHEEL_INVERT を直します。</div>
+  </details>
 </section>
 
 <main id="log">
@@ -329,6 +365,47 @@
   });
   setInterval(() => {
     if (micAt && Date.now() - micAt > 3000) $('mic-state').textContent = '律の画面から知らせが来ていません(声を使っていないか、止まっている)';
+  }, 1000);
+
+  // 台車: 押している間 0.1秒ごとに /cmd_vel を送る。離すと止める(届かなくなっても台車側が0.5秒で止まる)
+  const drivePanel = $('drive');
+  $('drive-btn').addEventListener('click', () => drivePanel.classList.toggle('show'));
+  let driveTimer = null;
+  const twist = (vx, vy, wz) => ros.pub('/cmd_vel', 'geometry_msgs/Twist',
+    { linear: { x: vx, y: vy, z: 0 }, angular: { x: 0, y: 0, z: wz } });
+  const stopDrive = () => {
+    clearInterval(driveTimer); driveTimer = null;
+    drivePanel.querySelectorAll('.pad button.on').forEach(b => b.classList.remove('on'));
+    twist(0, 0, 0);
+  };
+  drivePanel.querySelectorAll('.pad button').forEach(btn => {
+    const [x, y, z] = btn.dataset.v.split(',').map(Number);
+    btn.addEventListener('pointerdown', e => {
+      e.preventDefault();
+      stopDrive();
+      if (!x && !y && !z) return;
+      btn.setPointerCapture(e.pointerId);
+      btn.classList.add('on');
+      const spd = Number(drivePanel.querySelector('[name=spd]:checked').value);
+      const send = () => twist(x * spd, y * spd, z * spd * 5);     // 回るのは 0.5 / 1.0 rad/s
+      send();
+      driveTimer = setInterval(send, 100);
+    });
+    for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) btn.addEventListener(ev, () => { if (driveTimer) stopDrive(); });
+  });
+  document.addEventListener('visibilitychange', () => { if (document.hidden && driveTimer) stopDrive(); });
+  drivePanel.querySelectorAll('[data-w]').forEach(btn => btn.addEventListener('click', () =>
+    ros.pub('/ritsu/base_test', 'std_msgs/String', { data: JSON.stringify({ wheel: Number(btn.dataset.w), pwm: 120, sec: 1 }) })));
+  let baseAt = 0;
+  ros.sub('/ritsu/base_status', 'std_msgs/String', m => {
+    const st = parse(m.data);
+    baseAt = Date.now();
+    $('drive-state').textContent = !st.ok ? `STM32 とつながりません(${st.error})`
+      : st.fault && st.fault.length ? `${st.fault.join('・')}が回らないので止めました(引っかかり・配線を確認)`
+      : st.test ? `${st.test}を試し回し中` : `つながっています・車輪の速さ ${st.speed.map(v => v.toFixed(2)).join(' / ')} m/s`;
+  });
+  setInterval(() => {
+    if (baseAt && Date.now() - baseAt > 3000) $('drive-state').textContent = '台車のノードから知らせが来ていません';
   }, 1000);
 
   document.getElementById('form').addEventListener('submit', e => {

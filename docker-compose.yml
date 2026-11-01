@@ -4,7 +4,8 @@
 #   rosbridge  : ROS 2 とブラウザ(画面の律・iPhone の入力ページ)をつなぐ WebSocket (9090)
 #   perception : 深度カメラ(Orbbec Gemini 335)の人検出・傾き・マスターの顔の見分け ROS 2 ノード
 #   memory     : 律の記憶(今日のこと・マスターとの話)と反応の記録を ./data に残す ROS 2 ノード
-#   ROS 2 の3つはホストネットワーク + ipc: host (同じホスト内のDDS共有メモリ通信のため)。
+#   base       : 台車(メカナム4輪)。/cmd_vel を UNO Q の STM32 (arduino/ritsu-base) へ送り /odom を出す ROS 2 ノード
+#   ROS 2 のノードはホストネットワーク + ipc: host (同じホスト内のDDS共有メモリ通信のため)。
 #   台車のノードや別マシン(Jetson 等)の ROS 2 とも、同じネットワーク・同じ ROS_DOMAIN_ID ならつながる。
 
 x-ros: &ros
@@ -68,3 +69,18 @@ services:
       - TZ=${TZ:-Asia/Tokyo}                        # 記録の日付・時刻を日本時間にする
       - NEWS_FEEDS=${NEWS_FEEDS-top-picks,entertainment,sports,science,it}   # 話題にするニュースの種類(空で取らない)
     command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && exec python3 ritsu_memory.py"]
+
+  base:
+    <<: *ros
+    container_name: ritsu-base
+    volumes:
+      - /var/run/arduino-router.sock:/var/run/arduino-router.sock   # STM32 と話す arduino-router (UNO Q の Linux 側)
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - WHEEL_DIAMETER=${WHEEL_DIAMETER:-0.08}      # [m] 車輪の直径
+      - WHEEL_LX=${WHEEL_LX:-0.10}                  # [m] 車体の中心から前輪・後輪の軸まで
+      - WHEEL_LY=${WHEEL_LY:-0.12}                  # [m] 車体の中心から左右の車輪まで
+      - WHEEL_INVERT=${WHEEL_INVERT:-0,1,0,1}       # 向きが逆の車輪を 1 に(左前,右前,左後,右後)
+      - MAX_LINEAR=${MAX_LINEAR:-0.3}               # [m/s]
+      - MAX_ANGULAR=${MAX_ANGULAR:-1.2}             # [rad/s]
+    command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && exec python3 ritsu_base.py"]

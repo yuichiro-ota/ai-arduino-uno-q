@@ -64,6 +64,7 @@ volatile bool driving[4];            // PWM を出している(このときだ�
 volatile unsigned long lastPulseUs[4];
 
 void onPulse(int i) {
+  if (!digitalRead(PINS[i].enc)) return;   // もう LOW = L298N の PWM のノイズ(1µs 未満のトゲ)。本物は数百µs HIGH が続く
   const unsigned long us = micros();
   if (us - lastPulseUs[i] < PULSE_MIN_US) return;
   lastPulseUs[i] = us;

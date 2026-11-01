@@ -253,6 +253,12 @@ const LEARN_EXPLORE = 0.2;       // それ以降も、この確率で結果に�
 /* ---- 記憶 ---- */
 const TODAY_NOTES_MAX = 8;       // 今日の会話の要約をいくつ覚えるか
 const MASTER_NOTES_MAX = 12;     // マスターとの会話の要約をいくつ覚えるか
+// 会話から、律自身のこと(好きなもの・趣味・やっていること)とマスターのことを覚え、次から同じ答えにする。
+// 会話が途切れて FACT_IDLE_SEC 秒たち LLM が空いているとき、たまった会話からまとめて抜き出す
+const PERSONA_MAX = 24;          // 律について覚える数(古いものから忘れる)
+const MASTER_FACTS_MAX = 20;     // マスターについて覚える数
+const FACT_IDLE_SEC = 8;
+const FACT_BATCH = 4;            // 一度に見る会話の数
 const MEMORY_WAIT_SEC = 10;      // 起動後この秒数のうちに保存した記憶が届かなければ、空の記憶で始める
 
 const TAG_RE = /\[(emotion|motion):([a-zA-Z0-9_]+)\]/g;
@@ -349,6 +355,8 @@ class RitsuBrain {
     this.pending = [];           // 結果を待っている反応
     this.visitLog = [];          // 今回の来訪での会話 [[相手, 律], ...] (去ったら要約して覚える)
     this.lastLinger = -Infinity;
+    this.factQueue = [];         // 覚えることを抜き出す前の会話 [{ user, reply, master }]
+    setInterval(() => this._learnFacts(), 5000);
     setTimeout(() => { if (!this.memoryLoaded) this.onMemory({}); }, MEMORY_WAIT_SEC * 1000);
     setInterval(() => this._settleOutcomes(), 1000);
     this.ctx.on('arrive', absentSec => this._onArrive(absentSec));
@@ -382,7 +390,10 @@ class RitsuBrain {
     if (this.ctx.personPresent && this.visitLog.length === 0 && !this.ctx.isMaster) this._bumpToday('talked');
     this._log({ type: 'chat', len: userText.length, present: this.ctx.personPresent, master: this.ctx.isMaster });
     const { text, motion, emotion, ok } = await this._complete(userText.replace(NICKNAME_RE, '律ちゃん'));
-    if (ok) this.visitLog = [...this.visitLog, [userText, text]].slice(-10);
+    if (ok) {
+      this.visitLog = [...this.visitLog, [userText, text]].slice(-10);
+      this.factQueue = [...this.factQueue, { user: userText, reply: text, master: this.ctx.isMaster }].slice(-FACT_BATCH * 3);
+    }
     this.act({ text, motion, emotion, source: ok ? 'llm' : 'fallback' });
     this.lastInteraction = this.lastChat = performance.now();
     this.busy = false;
@@ -842,7 +853,7 @@ motion は次から選ぶ: ${motions.join(', ')}
     if (this.memoryLoaded) return;
     this.memoryLoaded = true;
     const local = this.memory;
-    this.memory = { today: m.today || null, master: m.master || null };
+    this.memory = { today: m.today || null, master: m.master || null, persona: m.persona || null };
     // 届く前に覚えたこと(起動直後の来訪など)を足す
     if (local.today) {
       const t = this._today();
@@ -851,9 +862,15 @@ motion は次から選ぶ: ${motions.join(', ')}
       t.master = t.master || local.today.master;
       this._put('today');
     }
+    if (local.persona) {
+      const p = this._persona();
+      p.facts = [...p.facts, ...local.persona.facts].slice(-PERSONA_MAX);
+      this._put('persona');
+    }
     if (local.master) {
       const ms = this._master();
       ms.notes = [...ms.notes, ...local.master.notes].slice(-MASTER_NOTES_MAX);
+      ms.facts = [...(ms.facts || []), ...(local.master.facts || [])].slice(-MASTER_FACTS_MAX);
       ms.lastSeen = local.master.lastSeen || ms.lastSeen;
       this._put('master');
     }
@@ -882,7 +899,65 @@ motion は次から選ぶ: ${motions.join(', ')}
 
   _master() {
     if (!this.memory.master) this.memory.master = { lastSeen: null, notes: [] };
+    if (!this.memory.master.facts) this.memory.master.facts = [];
     return this.memory.master;
+  }
+
+  /** 律が自分について話したこと { facts: [{ text, date }] } */
+  _persona() {
+    if (!this.memory.persona) this.memory.persona = { facts: [] };
+    return this.memory.persona;
+  }
+
+  /** たまった会話から、律自身のこととマスターのことを抜き出して覚える(会話が途切れて LLM が空いているときだけ) */
+  async _learnFacts() {
+    if (!this.factQueue.length || this.learning || this.busy || !this._llmFree() ||
+        (performance.now() - this.lastChat) / 1000 < FACT_IDLE_SEC) return;
+    const batch = this.factQueue.splice(0, FACT_BATCH);
+    const anyMaster = batch.some(b => b.master);
+    const persona = this._persona().facts.map(f => f.text);
+    const master = this._master().facts.map(f => f.text);
+    const transcript = batch.map(b => `${b.master ? 'マスター' : '相手'}: ${b.user}\n律: ${b.reply}`).join('\n');
+    const prompt = `次の会話から、ずっと覚えておく事実だけを抜き出してください。
+- 「律:」で始まる行: 律が自分について言ったこと(好きなもの・苦手なもの・趣味・得意なこと・普段していること・考え方)
+${anyMaster ? '- 「マスター:」で始まる行: マスターが自分について言ったこと(好きなもの・趣味・仕事・予定など)\n' : ''}- 1行に1つ、25文字以内、言い切りの形で(例: 律: 好きな食べ物はいちご / マスター: 猫を飼っている)
+- 挨拶・気分・天気・その場だけの話は書かない。下の「覚えていること」と同じ内容や矛盾する内容は書かない
+- 何も無ければ「なし」とだけ書く
+
+覚えていること(律): ${persona.join(' / ') || 'なし'}
+${anyMaster ? `覚えていること(マスター): ${master.join(' / ') || 'なし'}\n` : ''}
+会話:
+${transcript}`;
+    this.learning = true;
+    const startedChat = this.lastChat;
+    const reply = await this._request([{ role: 'system', content: 'あなたは会話から事実を抜き出す係です。日本語で、指定の形式だけを書きます。' },
+                                       { role: 'user', content: prompt }], 0.2, RITSU_CFG.llmTimeoutSec, true, true);
+    this.learning = false;
+    if (!reply) {                // 話しかけられて打ち切ったなら、あとでもう一度
+      if (this.lastChat !== startedChat) this.factQueue = [...batch, ...this.factQueue];
+      return;
+    }
+    const norm = t => t.replace(/[\s。、!！?？「」]/g, '');
+    const add = (key, list, max, text) => {
+      const n = norm(text);
+      if (!n || list.some(f => norm(f.text) === n || norm(f.text).includes(n) || n.includes(norm(f.text)))) return false;
+      const d = new Date();
+      list.push({ text, date: `${d.getMonth() + 1}月${d.getDate()}日` });
+      list.splice(0, Math.max(0, list.length - max));
+      return true;
+    };
+    let p = false, m = false;
+    for (const line of reply.split('\n')) {
+      const hit = line.replace(/^[\s\-・*]+/, '').match(/^(律|マスター)\s*[:：]\s*(.+)$/);
+      if (!hit) continue;
+      const text = hit[2].replace(/[。.]+$/, '').trim().slice(0, 40);
+      if (/^なし$/.test(text)) continue;
+      if (hit[1] === '律') p = add('persona', this._persona().facts, PERSONA_MAX, text) || p;
+      else if (anyMaster) m = add('master', this._master().facts, MASTER_FACTS_MAX, text) || m;
+    }
+    if (p) this._put('persona');
+    if (m) this._put('master');
+    if (p || m) console.log('[brain] learned:', reply.replace(/\n/g, ' / '));
   }
 
   _bumpToday(key) { this._today()[key]++; this._put('today'); }
@@ -911,6 +986,8 @@ motion は次から選ぶ: ${motions.join(', ')}
   /** システムプロンプトに入れる「覚えていること」 */
   _memoryText() {
     const lines = [];
+    const persona = [...(RITSU_CFG.persona || []), ...(this.memory.persona ? this.memory.persona.facts.map(f => f.text) : [])];
+    if (persona.length) lines.push(`律自身のこと(前に自分で言ったこと。聞かれたら必ずこれと同じ答えにし、矛盾することは言わない): ${persona.join(' / ')}`);
     const t = this.memory.today;
     const d = new Date();
     if (t && t.date === `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`) {
@@ -922,6 +999,9 @@ motion は次から選ぶ: ${motions.join(', ')}
     const ms = this.memory.master;
     if (this.ctx.isMaster && ms && ms.notes.length) {
       lines.push('マスターと前に話したこと: ' + ms.notes.slice(-5).map(n => `${n.date} ${n.text}`).join(' / '));
+    }
+    if (this.ctx.isMaster && ms && ms.facts && ms.facts.length) {
+      lines.push('マスターのこと(好きなもの・趣味など): ' + ms.facts.map(f => f.text).join(' / '));
     }
     return lines.join('\n');
   }

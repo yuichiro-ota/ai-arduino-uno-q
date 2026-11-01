@@ -29,6 +29,10 @@ window.RITSU_CONFIG = {
   // ニュースは聞かれたときにも答える。取らないときは docker-compose の NEWS_FEEDS を空にする
   newsIdleChance: 0.2,
 
+  // 律の決まりごと(好きなもの・趣味など)。会話から覚えたことに加えて、いつもプロンプトに入れる
+  //   例: ['好きな食べ物はいちごのショートケーキ', '趣味は空の雲を眺めること']
+  persona: [],
+
   // 声で話す(kiosk 画面のみ。文字起こし Whisper と音声合成 VOICEVOX は CT200 の voice-server)。null にすると声を使わない
   //   speaker/style: VOICEVOX の声 / speed: 話す速さ / volume: 音量(0〜1。スピーカー本体でも調整できる)
   //   needPerson: true でカメラに人が映っている間だけ聞く(周りの話し声に答えないように)。false はいつでも聞く

@@ -498,9 +498,10 @@
     memory: () => ({ ...brain.memory, stats: brain.stats }),
     voice: () => voice,
     // マイクの音量を sec 秒ぶん表示する。話して level が threshold を超えれば声として拾える
+    replay: () => voice && voice.replay(),   // 最後に聞き取った声を再生する(途切れていないか確かめる)
     micTest: (sec = 5) => {
       if (!voice) return console.log('声が使えない画面です(?voice=1 を付ける)');
-      console.log('マイク:', voice.mic.device);
+      console.log('マイク:', voice.mic.device, '/ 取り込み:', voice.mic.capture);
       const t = setInterval(() => {
         const m = voice.mic;
         console.log(`level ${m.level.toFixed(3)} / threshold ${m.threshold.toFixed(3)} ${m.listening ? '聞いている' : '聞いていない(人がいない・話し中など)'}` +

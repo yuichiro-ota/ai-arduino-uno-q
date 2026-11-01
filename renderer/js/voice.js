@@ -8,7 +8,7 @@
 
 const VOICE_FRAME = 2048;          // 音量を見る単位 [サンプル] (48kHz で約43ms)
 const VOICE_START_FRAMES = 3;      // 声の大きさがこの回数続いたら話し始め(約130ms)
-const VOICE_END_SEC = 0.7;         // この秒数静かになったら話し終わり
+const VOICE_END_SEC = 1.0;         // この秒数静かになったら話し終わり(短いと言葉の途中の間で切れ、続きを聞き逃す)
 const VOICE_MIN_SEC = 0.4;         // これより短い音は咳や物音として捨てる
 const VOICE_MAX_SEC = 12;          // 長すぎる話はここで区切る
 const VOICE_PREROLL = 8;           // 話し始めの前も少し含める [単位] (約350ms。語頭が切れないように)
@@ -31,6 +31,22 @@ const READ_FIX = [
 const readable = text => READ_FIX.reduce((t, [re, to]) => t.replace(re, to), text);
 const STT_HALLUCINATIONS = /^(ご視聴ありがとうございました|チャンネル登録(よろしくお願いします)?|ご清聴ありがとうございました|おやすみなさい|字幕.*|はい)[。!！]?$/;
 
+// マイクの音を VOICE_FRAME サンプルずつまとめてメインスレッドへ送る AudioWorklet(ファイルを分けないよう文字列で持つ)
+const CAPTURE_WORKLET = `
+class RitsuCapture extends AudioWorkletProcessor {
+  constructor(o) { super(); this.frame = o.processorOptions.frame; this.buf = new Float32Array(this.frame); this.n = 0; }
+  process(inputs) {
+    const x = inputs[0] && inputs[0][0];
+    if (x) for (let i = 0; i < x.length; i++) {
+      this.buf[this.n++] = x[i];
+      if (this.n === this.frame) { this.port.postMessage(this.buf, [this.buf.buffer]); this.buf = new Float32Array(this.frame); this.n = 0; }
+    }
+    return true;
+  }
+}
+registerProcessor('ritsu-capture', RitsuCapture);
+`;
+
 class RitsuVoice {
   /** cfg: config.js の voice / onText(text): 聞き取れた言葉 / canListen(): 今聞いてよいか /
    *  onState(state): 'off' | 'ready' | 'paused'(人がいない・返事中などで聞いていない) | 'hearing' | 'recognizing'
@@ -45,7 +61,7 @@ class RitsuVoice {
     this.onRecognizing = onRecognizing || (() => {});
     this.onSpeechEnd = onSpeechEnd || (() => {});
     this.fillers = { ack: [], think: [] };   // 相槌の音声(AudioBuffer)
-    this.mic = { level: 0, threshold: 0, listening: false, device: '' };   // マイクの様子(確認用。RITSU.micTest())
+    this.mic = { level: 0, threshold: 0, listening: false, device: '', capture: '' };   // マイクの様子(確認用。RITSU.micTest())
     this.ctx = null;
     this.speakerId = null;
     this.ttsOk = false;
@@ -214,17 +230,14 @@ class RitsuVoice {
     this.mic.device = stream.getAudioTracks()[0] ? stream.getAudioTracks()[0].label : '';
     console.log('[voice] mic:', this.mic.device);
     const src = this.ctx.createMediaStreamSource(stream);
-    // ScriptProcessor は古い方式だが、UNO Q の Chromium でも確実に動き、ファイルを分けなくてよい
-    const proc = this.ctx.createScriptProcessor(VOICE_FRAME, 1, 1);
     const mute = this.ctx.createGain();
     mute.gain.value = 0;                            // マイクの音はスピーカーへ流さない
-    src.connect(proc).connect(mute).connect(this.ctx.destination);
+    mute.connect(this.ctx.destination);
     const frameSec = VOICE_FRAME / this.ctx.sampleRate;
     let noise = 0.005, loud = 0, quiet = 0, inSpeech = false, lastBusy = null;
     let chunks = [], pre = [];
     this.onState('ready');
-    proc.onaudioprocess = e => {
-      const x = new Float32Array(e.inputBuffer.getChannelData(0));
+    const onFrame = x => {
       let sum = 0;
       for (const v of x) sum += v * v;
       const rms = Math.sqrt(sum / x.length);
@@ -263,12 +276,44 @@ class RitsuVoice {
         this.onState('ready');
         const sec = speech.length * frameSec - VOICE_PREROLL * frameSec;
         if (sec >= VOICE_MIN_SEC) {
+          this.lastClip = speech;                   // 確認用(RITSU.replay() で聞き直せる)
           this._recognize(speech);
           this.onSpeechEnd(sec);
         }
       }
     };
-    this._keepAlive = [stream, src, proc];          // ガベージコレクトで止まらないように
+    // 音の取り込みは AudioWorklet(音専用のスレッド)で。ScriptProcessor は画面の描画と同じスレッドで動くので、
+    // UNO Q のように描画が重いと間に合わずに音が抜け、言葉が途切れて文字になる。使えないブラウザだけ ScriptProcessor
+    let node;
+    try {
+      const url = URL.createObjectURL(new Blob([CAPTURE_WORKLET], { type: 'application/javascript' }));
+      await this.ctx.audioWorklet.addModule(url);
+      node = new AudioWorkletNode(this.ctx, 'ritsu-capture', { processorOptions: { frame: VOICE_FRAME } });
+      node.port.onmessage = e => onFrame(e.data);
+      this.mic.capture = 'AudioWorklet';
+    } catch (e) {
+      console.warn('[voice] AudioWorklet unavailable, using ScriptProcessor:', e);
+      node = this.ctx.createScriptProcessor(VOICE_FRAME, 1, 1);
+      node.onaudioprocess = ev => onFrame(new Float32Array(ev.inputBuffer.getChannelData(0)));
+      this.mic.capture = 'ScriptProcessor';
+    }
+    src.connect(node).connect(mute);
+    console.log('[voice] capture:', this.mic.capture);
+    this._keepAlive = [stream, src, node];          // ガベージコレクトで止まらないように
+  }
+
+  /** 最後に聞き取った声を再生する(確認用。途切れて聞こえるなら取り込みで音が抜けている) */
+  replay() {
+    if (!this.lastClip) return false;
+    const n = this.lastClip.reduce((a, c) => a + c.length, 0);
+    const buf = this.ctx.createBuffer(1, n, this.ctx.sampleRate);
+    let o = 0;
+    for (const c of this.lastClip) { buf.getChannelData(0).set(c, o); o += c.length; }
+    const s = this.ctx.createBufferSource();
+    s.buffer = buf;
+    s.connect(this.ctx.destination);
+    s.start();
+    return n / this.ctx.sampleRate;
   }
 
   /** 切り出した声を 16kHz の WAV にして Whisper へ送る */
@@ -295,7 +340,7 @@ class RitsuVoice {
       if (text) console.log('[voice] ignored:', text);
       return;
     }
-    console.log('[voice] heard:', text);
+    console.log(`[voice] heard (${(chunks.length * VOICE_FRAME / this.ctx.sampleRate).toFixed(1)}s):`, text);
     this.onText(text.slice(0, 200));
   }
 }

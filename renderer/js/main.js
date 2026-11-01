@@ -424,17 +424,20 @@
     });
   }
 
+  // 画面のチャット欄(index.html でコメントにしてある間は無い)
   const input = document.getElementById('chat-input');
-  const send = () => {
-    const text = input.value.trim();
-    if (!text) return;
-    input.value = '';
-    // kiosk では画面のキーボード入力も ROS 2 に流し、入力ページの履歴にも出す
-    if (chatOverRos()) pubJson('/ritsu/chat_user', { text, from: 'screen' });
-    else brain.chat(text);
-  };
-  document.getElementById('chat-send').addEventListener('click', send);
-  input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+  if (input) {
+    const send = () => {
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+      // kiosk では画面のキーボード入力も ROS 2 に流し、入力ページの履歴にも出す
+      if (chatOverRos()) pubJson('/ritsu/chat_user', { text, from: 'screen' });
+      else brain.chat(text);
+    };
+    document.getElementById('chat-send').addEventListener('click', send);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+  }
 
   /* ===== メインループ ===== */
   let last = performance.now();

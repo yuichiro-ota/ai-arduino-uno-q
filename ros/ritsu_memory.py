@@ -11,6 +11,8 @@ ritsu_memory.py — 律の記憶と反応の記録 ROS 2 ノード
   /ritsu/memory_put  std_msgs/String  JSON {"key":"today"|"master"|"persona"|"knowledge", "value":{...}}  覚えていることを書き換える
   /ritsu/log         std_msgs/String  JSON {"type":"arrive"|"leave"|"react"|"outcome"|..., ...}  反応の記録
                      日付ごとに DATA_DIR/log/YYYY-MM-DD.jsonl へ追記する
+  memory.json は保存のたびに DATA_DIR/backup/memory-YYYY-MM-DD.json にも控えを残し(BACKUP_DAYS 日分)、
+  起動時に memory.json が壊れていたら一番新しい控えから戻す
 発行トピック:
   /ritsu/memory      std_msgs/String  JSON {"today":{...}, "master":{...}, "persona":{...}, "knowledge":{...}, "stats":{...}, "news":{...}}
                      書き換えたとき+5秒ごと。stats は直近 LEARN_DAYS 日の反応の結果
@@ -39,6 +41,8 @@ DATA_DIR = os.environ.get("DATA_DIR", "/data")
 LEARN_DAYS = int(os.environ.get("LEARN_DAYS", "30"))
 MEMORY_PATH = os.path.join(DATA_DIR, "memory.json")
 LOG_DIR = os.path.join(DATA_DIR, "log")
+BACKUP_DIR = os.path.join(DATA_DIR, "backup")   # memory.json の日ごとの控え(壊れたときに戻す)
+BACKUP_DAYS = 14
 KEYS = ("today", "master", "persona", "knowledge")   # memory_put で書き換えてよい項目
 #   persona: 律が自分について話したこと / knowledge: 教えてもらった言葉
 MAX_VALUE_BYTES = 20000              # 1項目の大きさの上限(壊れた送信でファイルが膨らまないように)
@@ -59,24 +63,48 @@ NEWS_BLOCK = ("死", "亡", "殺", "事故", "衝突", "逮捕", "容疑", "被�
               "サイバー")
 
 
+def _read(path):
+    with open(path, encoding="utf-8") as f:
+        m = json.load(f)
+    return {k: m[k] for k in KEYS if k in m}
+
+
 def load_memory():
+    """memory.json が壊れていたら(電源が急に切れたときなど)、その日ごとの控えのうち一番新しいものから戻す"""
     try:
-        with open(MEMORY_PATH, encoding="utf-8") as f:
-            m = json.load(f)
-            return {k: m[k] for k in KEYS if k in m}
+        return _read(MEMORY_PATH)
     except FileNotFoundError:
-        return {}
+        pass
     except (OSError, ValueError) as e:
-        print(f"[memory] load error: {e}", flush=True)
-        return {}
+        broken = f"{MEMORY_PATH}.broken-{datetime.now():%Y%m%d-%H%M%S}"
+        print(f"[memory] memory.json が読めない({e})。{broken} に移して控えから戻す", flush=True)
+        try:
+            os.replace(MEMORY_PATH, broken)
+        except OSError:
+            pass
+    for path in sorted(glob.glob(os.path.join(BACKUP_DIR, "memory-*.json")), reverse=True):
+        try:
+            m = _read(path)
+            print(f"[memory] 控え {os.path.basename(path)} から戻した", flush=True)
+            return m
+        except (OSError, ValueError):
+            continue
+    return {}
 
 
 def save_memory(memory):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    tmp = MEMORY_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(memory, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, MEMORY_PATH)
+    """書き終わってから入れ替え(fsync で、電源が急に切れても中身が空にならないように)、その日の控えも残す"""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    data = json.dumps(memory, ensure_ascii=False, indent=1)
+    for path in (MEMORY_PATH, os.path.join(BACKUP_DIR, f"memory-{date.today().isoformat()}.json")):
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    for old in sorted(glob.glob(os.path.join(BACKUP_DIR, "memory-*.json")))[:-BACKUP_DAYS]:
+        os.remove(old)
 
 
 def add_outcome(stats, e):

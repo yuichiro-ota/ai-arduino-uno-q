@@ -287,7 +287,6 @@ function overlap(a, b) {
 }
 const FACT_IDLE_SEC = 8;
 const FACT_BATCH = 4;            // 一度に見る会話の数
-const MEMORY_WAIT_SEC = 10;      // 起動後この秒数のうちに保存した記憶が届かなければ、空の記憶で始める
 
 const TAG_RE = /\[(emotion|motion):([a-zA-Z0-9_]+)\]/g;
 const QUEUE_MAX = 5;   // 返事中に届いた話しかけを順番待ちさせる上限
@@ -389,7 +388,8 @@ class RitsuBrain {
     this.lastLinger = -Infinity;
     this.factQueue = [];         // 覚えることを抜き出す前の会話 [{ user, reply, master }]
     setInterval(() => this._learnFacts(), 5000);
-    setTimeout(() => { if (!this.memoryLoaded) this.onMemory({}); }, MEMORY_WAIT_SEC * 1000);
+    // 保存した記憶(/ritsu/memory)が届くまでは手元だけで覚え、memory ノードへは書かない。
+    // (起動直後に ROS 2 の準備が遅れても、空の記憶で保存を上書きしないように。届いたら手元の分を足して保存する)
     setInterval(() => this._settleOutcomes(), 1000);
     this.ctx.on('arrive', absentSec => this._onArrive(absentSec));
     this.ctx.on('identify', () => this._onIdentify());
@@ -827,6 +827,9 @@ motion は次から選ぶ: ${motions.join(', ')}
     if (this.visitLog.length) this._rememberVisit(this.visitLog, master);
     this.visitLog = [];
     if (talked) this.history = [];   // 次の人に前の人との会話を引き継がない(要約は覚えている)
+    // 見送り(去った側を向いて手を振り「また来てくださいね」)はやめる: 台車が動くと人がカメラの外に出るだけで
+    // 「去った」になり、いるのに見送ってしまうため。戻すときはこのコメントを外す
+    /*
     const now = performance.now();
     if (!engaged || this.busy || (now - this.lastReact) / 1000 < 3) return;   // 見送りは挨拶の間隔を待たない
     this.lastReact = this.lastInteraction = now;
@@ -835,6 +838,7 @@ motion は次から選ぶ: ${motions.join(', ')}
                : night ? 'おやすみなさい。またお越しくださいね。'
                : SEE_OFF_LINES[Math.floor(Math.random() * SEE_OFF_LINES.length)];
     this.act({ text, motion: dir > 0 ? 'seeOffR' : dir < 0 ? 'seeOffL' : 'byebye', emotion: 'happy', source: 'idle' });
+    */
   }
 
   /** ③ 画面のすぐ前に手: 内側から同じ側に手を合わせる */

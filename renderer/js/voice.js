@@ -61,7 +61,11 @@ class RitsuVoice {
     this.onRecognizing = onRecognizing || (() => {});
     this.onSpeechEnd = onSpeechEnd || (() => {});
     this.fillers = { ack: [], think: [] };   // 相槌の音声(AudioBuffer)
-    this.mic = { level: 0, threshold: 0, listening: false, device: '', capture: '' };   // マイクの様子(確認用。RITSU.micTest())
+    // マイクの様子(確認用。RITSU.micTest() と /remote の「マイク」)
+    //   frames: 届いた音の数(増えていればマイクの音は来ている) / peak: 前回見たとき以降の一番大きい音 /
+    //   why: 聞いていない理由 / heard・ignored・error: 最後に文字にしたもの・捨てたもの・失敗
+    this.mic = { level: 0, peak: 0, threshold: 0, listening: false, why: '', device: '', capture: '', frames: 0,
+                 heard: null, ignored: null, error: null };   // マイクの様子(確認用。RITSU.micTest())
     this.ctx = null;
     this.speakerId = null;
     this.ttsOk = false;
@@ -241,8 +245,13 @@ class RitsuVoice {
       let sum = 0;
       for (const v of x) sum += v * v;
       const rms = Math.sqrt(sum / x.length);
-      const busy = this.speaking || performance.now() - this.speakEnd < VOICE_TAIL_SEC * 1000 || !this.canListen();
+      const why = this.speaking ? '律が話している' : performance.now() - this.speakEnd < VOICE_TAIL_SEC * 1000 ? '話し終わった直後'
+                : !this.canListen() ? '返事を考え中か、カメラに人がいない' : '';
+      const busy = !!why;
       const th = Math.max(VOICE_MIN_RMS, noise * VOICE_NOISE_K);
+      this.mic.frames++;
+      this.mic.why = why;
+      this.mic.peak = Math.max(this.mic.peak, rms);
       this.mic.level = rms;
       this.mic.threshold = th;
       if (busy !== lastBusy) {                      // 聞く/聞かないが変わったらランプへ
@@ -286,6 +295,7 @@ class RitsuVoice {
     // UNO Q のように描画が重いと間に合わずに音が抜け、言葉が途切れて文字になる。使えないブラウザだけ ScriptProcessor
     let node;
     try {
+      if (this.cfg.capture === 'script') throw new Error('capture=script');
       const url = URL.createObjectURL(new Blob([CAPTURE_WORKLET], { type: 'application/javascript' }));
       await this.ctx.audioWorklet.addModule(url);
       node = new AudioWorkletNode(this.ctx, 'ritsu-capture', { processorOptions: { frame: VOICE_FRAME } });
@@ -333,14 +343,18 @@ class RitsuVoice {
       text = ((await res.json()).text || '').trim().replace(NAME_FIX, '律$2');
     } catch (e) {
       console.warn('[voice] STT error:', e);
+      this.mic.error = { text: String(e), at: Date.now() };
     }
+    const sec = +(chunks.length * VOICE_FRAME / this.ctx.sampleRate).toFixed(1);
     this.onRecognizing(false);
     this.onState('ready');
     if (!text || STT_HALLUCINATIONS.test(text) || !/[\p{L}\p{N}]/u.test(text)) {
       if (text) console.log('[voice] ignored:', text);
+      this.mic.ignored = { text, sec, at: Date.now() };
       return;
     }
-    console.log(`[voice] heard (${(chunks.length * VOICE_FRAME / this.ctx.sampleRate).toFixed(1)}s):`, text);
+    console.log(`[voice] heard (${sec}s):`, text);
+    this.mic.heard = { text, sec, at: Date.now() };
     this.onText(text.slice(0, 200));
   }
 }

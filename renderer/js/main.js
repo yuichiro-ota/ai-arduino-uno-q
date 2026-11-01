@@ -388,6 +388,14 @@
     document.getElementById('lamp-mic-wrap').classList.remove('hidden');
     document.getElementById('credit').textContent = `VOICEVOX:${voice.cfg.speaker}`;
     voice.init();
+    // マイクの様子を ROS 2 へ(kiosk のみ)。/remote の「マイク」で見られる(kiosk 画面で F12 を開かなくてよいように)
+    if (RITSU_CFG.kiosk && ros) setInterval(() => {
+      const m = voice.mic;
+      pubJson('/ritsu/voice_status', { capture: m.capture, device: m.device, audio: voice.ctx ? voice.ctx.state : '',
+        frames: m.frames, level: +m.level.toFixed(3), peak: +m.peak.toFixed(3), threshold: +m.threshold.toFixed(3),
+        listening: m.listening, why: m.why, tts: voice.ttsOk, heard: m.heard, ignored: m.ignored, error: m.error });
+      m.peak = 0;
+    }, 1000);
   }
 
   if (ros) {

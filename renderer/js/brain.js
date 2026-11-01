@@ -32,6 +32,8 @@ const RITSU_CFG = (() => {
   cfg.voiceOn = !!cfg.voice && (q.get('voice') ? q.get('voice') === '1' : cfg.kiosk);
   // ?needperson=0: カメラが無い PC で試すとき、人が映っていなくても聞く
   if (cfg.voice && q.get('needperson') === '0') cfg.voice = { ...cfg.voice, needPerson: false };
+  // ?capture=script: マイクの取り込みを古い方式(ScriptProcessor)にする(AudioWorklet で聞こえないときの切り分け)
+  if (cfg.voice && q.get('capture')) cfg.voice = { ...cfg.voice, capture: q.get('capture') };
   cfg.llmUrl = cfg.llmUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
   return cfg;
 })();

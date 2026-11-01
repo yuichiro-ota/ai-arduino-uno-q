@@ -17,6 +17,9 @@ ritsu_perception.py — 律の人検出 ROS 2 ノード (Orbbec Gemini 335)
   /ritsu/person_id       std_msgs/String   JSON {"id":"master"|"","score":0.52} 顔で見分けた相手。
                          変化したとき+2秒ごと(登録した顔が無いときは送らない)
   /ritsu/enroll_status   std_msgs/String   JSON {"state":"capturing"|"done"|"failed"|"cleared","count":n}
+  /ritsu/obstacle        std_msgs/String   JSON {"front":0.82,"left":null,"right":1.30} 台車の前方の障害物までの距離 [m]
+                         (null は OBSTACLE_RANGE 以内に何も無い)。毎回送る。深度を台車の高さに直して床を除き、
+                         front = 台車の幅(ROBOT_HALF_WIDTH)の通り道 / left・right = その外側の斜め前(45度まで)
 
 購読トピック:
   /ritsu/enroll          std_msgs/String   JSON {"action":"add"|"clear"} マスターの顔を登録する/消す。
@@ -31,6 +34,10 @@ ritsu_perception.py — 律の人検出 ROS 2 ノード (Orbbec Gemini 335)
   TOUCH_DIST      これより近い物を「画面のすぐ前の手」とみなす [m] (default 0.45)
   MASTER_MATCH    登録した顔とみなす類似度の下限 (default 0.40。SFace の推奨は 0.363、上げるほど厳しい)
   FACE_DB         登録した顔の特徴を保存するファイル (default /data/faces/master.npy)
+  CAMERA_HEIGHT     床からカメラまでの高さ [m] (default 1.0。障害物と床を分けるのに使う)
+  CAMERA_PITCH_DEG  カメラの下向きの角度 [度] (default 0。下に向けているほど大きく)
+  ROBOT_HALF_WIDTH  台車の幅の半分+余裕 [m] (default 0.2。これより内側の物が「正面」の障害物)
+  OBSTACLE_MIN      これより近い深度は使わない [m] (default 0.15。カメラに映る台車自身などを除く)
   DEBUG_SNAPSHOT  1 にすると5秒ごとにカメラ画像(検出枠つき)を debug/camera.jpg に保存する
                   (docker-compose で renderer/debug にマウント → http://<UNO Q>:8080/debug/camera.jpg で見られる)
 """
@@ -69,6 +76,13 @@ ENROLL_SHOTS = 6            # 登録1回でとる枚数
 ENROLL_SEC = 8              # この秒数で ENROLL_SHOTS 枚とれなければ、とれた分だけ保存する
 FACE_DB_MAX = 60            # 保存する特徴の上限(古いものから捨てる)
 DEBUG_SNAPSHOT = os.environ.get("DEBUG_SNAPSHOT", "0") == "1"
+CAMERA_HEIGHT = float(os.environ.get("CAMERA_HEIGHT", "1.0"))
+CAMERA_PITCH = math.radians(float(os.environ.get("CAMERA_PITCH_DEG", "0")))
+ROBOT_HALF_WIDTH = float(os.environ.get("ROBOT_HALF_WIDTH", "0.2"))
+OBSTACLE_MIN = float(os.environ.get("OBSTACLE_MIN", "0.15"))
+OBSTACLE_RANGE = 3.0        # [m] これより遠い物は見ない
+OBSTACLE_FLOOR = 0.06       # [m] 床からこれより低い点は床とみなす
+OBSTACLE_POINTS = 12        # 1つの方向でこれだけ点が無ければ「何も無い」(ノイズの点で止まらないように)
 SNAPSHOT_PATH = "/app/debug/camera.jpg"
 
 # ---------------- ROS 2 ----------------
@@ -83,6 +97,7 @@ pub_looking = node.create_publisher(Bool, "/ritsu/looking", 10)
 pub_hand = node.create_publisher(PointStamped, "/ritsu/hand_near", 10)
 pub_person_id = node.create_publisher(String, "/ritsu/person_id", 10)
 pub_enroll = node.create_publisher(String, "/ritsu/enroll_status", 10)
+pub_obstacle = node.create_publisher(String, "/ritsu/obstacle", 10)
 
 
 def publish_point(pub, x, y, z):
@@ -420,6 +435,30 @@ def detect_hand_near(depth, scale, face_box, intr):
     return {"x": (u - cx) / fx * z, "y": (v - cy) / fy * z, "z": z}
 
 
+def detect_obstacles(depth, scale, intr):
+    """台車の前方の障害物までの距離 {"front","left","right"} [m](無ければ None)。1/4 に間引いて軽くする。
+    深度の点をカメラの下向きの角度で水平に直し、床(OBSTACLE_FLOOR より低い)を除いてから方向ごとに近い物を見る"""
+    fx, fy, cx, cy = intr
+    step = 4
+    d = depth[::step, ::step].astype(np.float32) * scale / 1000.0
+    vs, us = np.mgrid[0:d.shape[0], 0:d.shape[1]] * step
+    ok = (d > OBSTACLE_MIN) & (d < OBSTACLE_RANGE)
+    z, x, y = d[ok], (us[ok] - cx) / fx * d[ok], (vs[ok] - cy) / fy * d[ok]
+    fwd = z * math.cos(CAMERA_PITCH) - y * math.sin(CAMERA_PITCH)        # 水平に直した前方向
+    down = y * math.cos(CAMERA_PITCH) + z * math.sin(CAMERA_PITCH)       # 水平に直した下方向
+    height = CAMERA_HEIGHT - down
+    keep = (height > OBSTACLE_FLOOR) & (fwd > 0)
+    x, fwd = x[keep], fwd[keep]
+    side = (np.abs(x) > ROBOT_HALF_WIDTH) & (np.abs(x) < fwd)            # 通り道の外で、斜め前45度まで
+    out = {}
+    for name, sel, dist in (("front", np.abs(x) <= ROBOT_HALF_WIDTH, fwd),
+                            ("left", side & (x < 0), np.hypot(x, fwd)),
+                            ("right", side & (x > 0), np.hypot(x, fwd))):
+        v = dist[sel]
+        out[name] = round(float(np.percentile(v, 5)), 2) if v.size >= OBSTACLE_POINTS else None
+    return out
+
+
 def detect_face(detector, view):
     """最も大きい(=近い)顔を返す: ((x, y, w, h), (目の中点 u, v), score, 顔の向き, YuNet の1行)。無ければ None"""
     vh, vw = view.shape[:2]
@@ -521,6 +560,8 @@ def main():
                                   to_sensor_uv(box[0] + box[2], box[1] + box[3], w, h))
             sbox = (min(u1, u2), min(v1, v2), abs(u2 - u1), abs(v2 - v1))
         hand = detect_hand_near(depth, scale, sbox, (fx, fy, cx, cy))
+        obstacle = detect_obstacles(depth, scale, (fx, fy, cx, cy))
+        publish_json(pub_obstacle, obstacle)
         hand_streak = hand_streak + 1 if hand else 0
         if hand_streak >= 2:
             publish_point(pub_hand, hand["x"], hand["y"], hand["z"])
@@ -545,6 +586,7 @@ def main():
                      if found else "no person")
             state += (f", yaw={yaw:+.2f}{' looking' if looking.state else ''}" if yaw is not None else "")
             state += f", hand z={hand['z']:.2f}m" if hand else ""
+            state += ", obstacle " + " ".join(f"{k}={'-' if v is None else f'{v:.2f}'}" for k, v in obstacle.items())
             state += f", id={face_id.id or '-'}({face_id.score:.2f})" if face_id.db is not None and found else ""
             imu_state = (f", tilt roll={tilt.roll:+.0f} pitch={tilt.pitch:+.0f}" if imu and tilt.base
                          else (", imu waiting" if imu else ""))

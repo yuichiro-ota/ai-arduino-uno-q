@@ -161,6 +161,8 @@ sudo reboot
 | `/odom` | `nav_msgs/Odometry` | 台車 → | エンコーダーから求めた動いた量（`odom` → `base_link`） |
 | `/ritsu/turn` | `std_msgs/String` | 画面の律（kiosk）・入力ページ → 台車 | JSON `{"reason":"greet","sec":8}` 台車ごと人の方を向く |
 | `/ritsu/turn_enable` | `std_msgs/Bool` | 入力ページ → 台車 | 人の方を向くか |
+| `/ritsu/obstacle` | `std_msgs/String` | 人検出 → 台車 | JSON `{"front":0.82,"left":null,"right":1.30}` 前方の障害物までの距離 [m]（null は無し） |
+| `/ritsu/base_event` | `std_msgs/String` | 台車 → 画面の律（kiosk） | JSON `{"type":"blocked","by":"move/manual","dist":0.32,"free":"left/right/null"}` 障害物で前に進むのを止めた |
 | `/ritsu/move` | `std_msgs/String` | 画面の律（kiosk） → 台車 | JSON `{"action":"back/forward/left/right"}` 少しだけ動く |
 | `/ritsu/base_test` | `std_msgs/String` | 入力ページ → 台車 | JSON `{"wheel":0-3,"pwm":120,"sec":1}` 1輪だけ回す（配線・向きの確認） |
 | `/ritsu/base_status` | `std_msgs/String` | 台車 → 入力ページ | JSON `{"ok":true,"error":"","fault":[],"enc_b":[B相で向きを読めている車輪],"speed":[4輪 m/s],"cmd":[vx,vy,wz]}` 0.5秒ごと |
@@ -256,6 +258,11 @@ Linux 側の `base` サービス（`ros/ritsu_base.py`）が `/cmd_vel` を4輪�
 - `/remote` の「動かす」の「人の方を向く」で切り替え、「こっちを向いて」で試せる。人から離れるように回るときは `.env` に `TURN_SIGN=-1`
 
 **「こっち向いて」**: 声やチャットで「律ちゃん、こっち向いて」と頼むと、ずれが小さくても正面まで向き直る。顔がカメラに映っていなければ（横や斜め後ろから呼んだとき）、最後に顔を見た側へ回りながら探し（最大 150度）、見つけたら正面に合わせる。`/remote` の「こっちを向いて」も同じ
+
+**障害物よけ**: カメラのノードが深度画像から台車の前方の障害物までの距離を「正面（台車の幅の通り道）・左・右」に分けて出し（`/ritsu/obstacle`）、正面の物が 0.4m（`OBSTACLE_STOP`）より近い間は、台車のノードが**前に進む指令だけ止める**（その場で回る・下がるはできる。十字ボタン・「前に来て」・「こっちおいで」どれも同じ）。
+- 「前に来て」などで止まったら、律が「前に何かあって、これ以上進めません。左のほうは空いています。」と知らせる（空いている側は 4-link-robot の Jev の決め方と同じく、空いている方・両方なら広い方）。十字ボタンのときは `/remote` の「動かす」に「障害物[m] 前 0.32 左 - 右 1.10（前に近いので進みません）」と出る
+- 床と障害物は高さで分けるので、実機に合わせて `.env` に `CAMERA_HEIGHT`（床からカメラまで [m]、既定 1.0）と `CAMERA_PITCH_DEG`（カメラの下向きの角度、既定 0）を書く。`ROBOT_HALF_WIDTH`（台車の幅の半分+余裕、既定 0.2m）、映り込む台車自身を除く `OBSTACLE_MIN`（既定 0.15m）も変えられる。`docker logs ritsu-camera` の5秒ごとのログに `obstacle front=… left=… right=…` が出るので、何も無いのに数字が出るときは高さ・角度を見直す
+- 見えるのは前方（カメラの画角）だけ。後ろと、カメラより低くて近い物（画角の下に入る物）は見えない
 
 **頼むと少し動く**: 声やチャットで「ちょっと後ろに下がって」「前に来て」「左向いて」「右向いて」と頼むと、LLM を使わずすぐ返事をして、前後は 15cm・左右は 30度だけゆっくり動く（`/ritsu/move`、`MOVE_DIST` / `MOVE_TURN_DEG`）。
 - 左右は律から見た向き（「左向いて」で律の左へ回る）。「前」はカメラの向き（話している人の方）

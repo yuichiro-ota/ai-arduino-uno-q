@@ -542,6 +542,16 @@ class RitsuBrain {
     this._log({ type: 'move', action: cmd.action, close, by });
   }
 
+  /** 台車からの知らせ(/ritsu/base_event)。頼まれて前に進もうとしたのに障害物で止まったら、そう伝える
+   *  (十字ボタンで動かしているときは /remote に出るので言わない) */
+  onBaseEvent(e) {
+    if (!e || e.type !== 'blocked' || e.by !== 'move') return;
+    const side = { left: '左', right: '右' }[e.free];
+    const text = '前に何かあって、これ以上進めません。' + (side ? `${side}のほうは空いています。` : '');
+    this.act({ text, motion: 'shakeNo', emotion: 'surprised', source: 'llm' });
+    this.history = [...this.history, { role: 'assistant', content: text }].slice(-12);
+  }
+
   /** 台車ごと目の前の人の方を向く(静かにしている間・人がいないときは向かない) */
   _turn(reason) {
     if (this.quiet || !this.ctx.personPresent) return;

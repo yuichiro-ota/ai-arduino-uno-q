@@ -56,6 +56,10 @@ services:
       - LOOK_YAW=${LOOK_YAW:-0.2}                   # 顔の向きがこれ以内なら「こちらを見ている」(大きいほど甘い)
       - TOUCH_DIST=${TOUCH_DIST:-0.45}              # [m] これより近い手に、律が内側から手を合わせる
       - MASTER_MATCH=${MASTER_MATCH:-0.40}          # 登録した顔とみなす類似度(上げるほど厳しい)
+      - CAMERA_HEIGHT=${CAMERA_HEIGHT:-1.0}         # [m] 床からカメラまでの高さ(障害物と床を分ける)
+      - CAMERA_PITCH_DEG=${CAMERA_PITCH_DEG:-0}     # [度] カメラの下向きの角度
+      - ROBOT_HALF_WIDTH=${ROBOT_HALF_WIDTH:-0.2}   # [m] 台車の幅の半分+余裕(この内側の物が正面の障害物)
+      - OBSTACLE_MIN=${OBSTACLE_MIN:-0.15}          # [m] これより近い深度は使わない(映り込む台車自身など)
     command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && exec python3 ritsu_perception.py"]
 
   memory:
@@ -88,4 +92,5 @@ services:
       - TURN_SIGN=${TURN_SIGN:-1}                   # 人から離れるように回ったら -1
       - MOVE_DIST=${MOVE_DIST:-0.15}                # [m] 「前に来て」「後ろに下がって」で動く距離
       - MOVE_TURN_DEG=${MOVE_TURN_DEG:-30}          # [度] 「左向いて」「右向いて」で回る角度
+      - OBSTACLE_STOP=${OBSTACLE_STOP:-0.4}         # [m] 正面の障害物がこれより近いと前に進まない
     command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && exec python3 ritsu_base.py"]

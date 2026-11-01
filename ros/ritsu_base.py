@@ -22,10 +22,15 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
                     前後は MOVE_DIST [m]、左右は MOVE_TURN_DEG 度(左右は律から見た向き)。エンコーダーで測った量で止め、
                     時間でも打ち切る。/cmd_vel(手の操作)が来たらやめる
   /ritsu/person     geometry_msgs/PointStamped  顔の位置(光学座標系 x:右 z:前)
+  /ritsu/obstacle   std_msgs/String  JSON {"front","left","right"} 前方の障害物までの距離 [m](カメラのノードが出す)
+                    front が OBSTACLE_STOP より近い間は、前に進む指令だけ止める(回る・下がるはできる。十字ボタンも同じ)
 発行トピック:
   /odom             nav_msgs/Odometry  frame odom / child base_link
   /ritsu/base_status  std_msgs/String  JSON {"ok":bool, "error":"...", "fault":[...], "enc_b":[...], "speed":[4輪 m/s], "cmd":[vx,vy,wz],
-                                                "turn":"向いている理由" or null, "turn_enable":bool, "move":"動いている向き" or null}
+                                                "turn":"向いている理由" or null, "turn_enable":bool, "move":"動いている向き" or null,
+                                                "obstacle":{"front","left","right"} or null, "blocked":bool}
+  /ritsu/base_event   std_msgs/String  JSON {"type":"blocked","by":"move"|"manual","dist":0.32,"free":"left"|"right"|null}
+                      前に進もうとして障害物で止めたとき(画面の律が知らせる)。free は空いている側(両方なら広い方)
                     enc_b は向きを B相で読めている車輪(最初に少し回すと決まる)
 
 環境変数:
@@ -41,6 +46,7 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
   TURN_SIGN       向く向きが逆(人から離れるように回る)なら -1 (default 1)
   MOVE_DIST       「前に来て」「後ろに下がって」で動く距離 [m] (default 0.15)
   MOVE_TURN_DEG   「左向いて」「右向いて」で回る角度 [度] (default 30)
+  OBSTACLE_STOP   正面の障害物がこれより近いと前に進まない [m] (default 0.4)
 """
 import json
 import math
@@ -76,6 +82,9 @@ MOVE_DIST = float(os.environ.get("MOVE_DIST", "0.15"))
 MOVE_TURN_DEG = float(os.environ.get("MOVE_TURN_DEG", "30"))
 MOVE_SPEED = 0.1                     # [m/s] 前後に動く速さ
 MOVE_TURN_SPEED = 0.5                # [rad/s] 左右を向く速さ
+OBSTACLE_STOP = float(os.environ.get("OBSTACLE_STOP", "0.4"))
+OBSTACLE_STALE_SEC = 1.0             # これより古い障害物の知らせは使わない(カメラが止まっている)
+OBSTACLE_FREE = 0.8                  # [m] 左右の物がこれより遠ければ「空いている」
 MOVE_ACTIONS = {"forward": (MOVE_SPEED, 0.0), "back": (-MOVE_SPEED, 0.0),
                 "left": (0.0, MOVE_TURN_SPEED), "right": (0.0, -MOVE_TURN_SPEED)}
 RATE_HZ = 20
@@ -130,10 +139,12 @@ def main():
     node = rclpy.create_node("ritsu_base")
     odom_pub = node.create_publisher(Odometry, "/odom", 10)
     status_pub = node.create_publisher(String, "/ritsu/base_status", 10)
+    event_pub = node.create_publisher(String, "/ritsu/base_event", 10)
     router = Router(ROUTER_SOCK)
     st = {"cmd": (0.0, 0.0, 0.0), "cmd_at": 0.0, "test": None, "last": None, "x": 0.0, "y": 0.0, "th": 0.0,
           "speed": [0.0] * 4, "fault": 0, "enc_b": 0, "ok": False, "error": "", "n": 0, "t": time.monotonic(),
-          "person": None, "turn": None, "turn_enable": TURN_ENABLE, "move": None}
+          "person": None, "turn": None, "turn_enable": TURN_ENABLE, "move": None,
+          "obstacle": None, "obstacle_at": 0.0, "blocked": False, "blocked_said": 0.0}
 
     def on_cmd(msg):
         st["cmd"] = (clamp(msg.linear.x, MAX_LINEAR), clamp(msg.linear.y, MAX_LINEAR), clamp(msg.angular.z, MAX_ANGULAR))
@@ -200,6 +211,34 @@ def main():
             return None
         return m["vx"], m["wz"]
 
+    def on_obstacle(msg):
+        try:
+            o = json.loads(msg.data)
+            st["obstacle"] = {k: (float(o[k]) if o.get(k) is not None else None) for k in ("front", "left", "right")}
+            st["obstacle_at"] = time.monotonic()
+        except (ValueError, TypeError, AttributeError, KeyError):
+            pass
+
+    def free_side():
+        """空いている側(4-link-robot の Jev の決め方と同じ: 空いている方、両方なら広い方)。どちらも塞がっていれば None"""
+        o = st["obstacle"] or {}
+        far = {k: (o.get(k) if o.get(k) is not None else 9.0) for k in ("left", "right")}
+        open_ = [k for k, v in far.items() if v >= OBSTACLE_FREE]
+        return max(open_, key=lambda k: far[k]) if open_ else None
+
+    def guard_forward(vx, vy, wz, by):
+        """正面に障害物があれば前に進む分を止める。止めたら知らせる"""
+        o, now = st["obstacle"], time.monotonic()
+        front = o["front"] if o and now - st["obstacle_at"] < OBSTACLE_STALE_SEC else None
+        blocked = vx > 0 and front is not None and front < OBSTACLE_STOP
+        if blocked and not st["blocked"] and now - st["blocked_said"] > 3.0:
+            st["blocked_said"] = now
+            free = free_side()
+            event_pub.publish(String(data=json.dumps({"type": "blocked", "by": by, "dist": front, "free": free})))
+            node.get_logger().info(f"前に障害物 {front:.2f}m: 進まない (空いている側: {free or 'なし'})")
+        st["blocked"] = blocked
+        return (0.0 if blocked else vx), vy, wz
+
     def on_turn_enable(msg):
         st["turn_enable"] = bool(msg.data)
         if not msg.data:
@@ -254,7 +293,10 @@ def main():
                 st["cmd"] = (move[0], 0.0, move[1])
             elif turn is not None:
                 st["cmd"] = (0.0, 0.0, turn)
-        vx, vy, wz = st["cmd"]
+        manual = time.monotonic() - st["cmd_at"] <= CMD_TIMEOUT_SEC
+        vx, vy, wz = guard_forward(*st["cmd"], "manual" if manual else "move" if st["move"] else "turn")
+        if st["blocked"] and st["move"] and st["move"]["vx"] > 0:
+            st["move"] = None            # 「前に来て」は止めて終わり(障害物の前で待ち続けない)
         v = (vx - vy - LXY * wz, vx + vy + LXY * wz, vx + vy - LXY * wz, vx - vy + LXY * wz)
         return [int(round(v[i] / M_PER_PULSE)) * INVERT[i] for i in range(4)]
 
@@ -316,6 +358,8 @@ def main():
             "cmd": [round(c, 2) for c in st["cmd"]], "test": WHEELS[st["test"][0]] if st["test"] else None,
             "turn": st["turn"]["reason"] if st["turn"] else None, "turn_enable": st["turn_enable"],
             "move": st["move"]["action"] if st["move"] else None,
+            "obstacle": st["obstacle"] if time.monotonic() - st["obstacle_at"] < OBSTACLE_STALE_SEC else None,
+            "blocked": st["blocked"],
         }, ensure_ascii=False)))
 
     node.create_subscription(Twist, "/cmd_vel", on_cmd, 10)
@@ -324,6 +368,7 @@ def main():
     node.create_subscription(String, "/ritsu/turn", on_turn, 10)
     node.create_subscription(Bool, "/ritsu/turn_enable", on_turn_enable, 10)
     node.create_subscription(String, "/ritsu/move", on_move, 10)
+    node.create_subscription(String, "/ritsu/obstacle", on_obstacle, 10)
     node.create_timer(1.0 / RATE_HZ, tick)
     node.get_logger().info(f"台車: 車輪 直径{WHEEL_R * 2:.3f}m 向き{INVERT} 最大 {MAX_LINEAR}m/s {MAX_ANGULAR}rad/s "
                            f"ソケット {ROUTER_SOCK} 人の方を向く {'する' if TURN_ENABLE else 'しない'}(最大 {TURN_MAX}rad/s)")

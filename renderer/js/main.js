@@ -15,7 +15,8 @@
  *   発行 /ritsu/memory_put     std_msgs/String  JSON {"key","value"} 覚えたことを保存 (kioskのみ)
  *   発行 /ritsu/log            std_msgs/String  JSON 来訪・反応・その結果の記録 (kioskのみ)
  *   発行 /ritsu/turn           std_msgs/String  JSON {"reason","sec"} 台車ごと相手の方を向いてと頼む (kioskのみ)
- *   発行 /ritsu/move           std_msgs/String  JSON {"action":"back/forward/left/right"} 台車で少し動く (kioskのみ)
+ *   発行 /ritsu/move           std_msgs/String  JSON {"action":"back/forward/left/right/stop"} 台車で少し動く (kioskのみ)
+ *   購読 /ritsu/base_event     std_msgs/String  JSON 台車からの知らせ(障害物で止まった など) (kioskのみ)
  *   発行 /ritsu/enroll         std_msgs/String  JSON {"action":"add"|"clear"} マスターの顔の登録 (RITSU.enroll())
  *   声: voice.js が /stt (Whisper) で聞き取り、/tts (VOICEVOX) で読み上げる(kiosk 画面のみ)。聞き取った言葉は
  *       /ritsu/chat_user に from:"voice" で流す
@@ -437,6 +438,10 @@
       try { brain.onMemory(JSON.parse(m.data)); } catch (e) { console.warn('[main] memory:', e); }
     });
     // /remote の「覚えたこと」から直す・消す・足す(記憶を持っている kiosk 画面だけが受ける)
+    // 台車からの知らせ(頼まれて前に進もうとしたのに障害物で止まった、など)。話すのは kiosk 画面だけ
+    if (RITSU_CFG.kiosk) ros.sub('/ritsu/base_event', 'std_msgs/String', m => {
+      try { brain.onBaseEvent(JSON.parse(m.data)); } catch (e) { console.warn('[main] base_event:', e); }
+    });
     if (RITSU_CFG.kiosk) ros.sub('/ritsu/memory_edit', 'std_msgs/String', m => {
       try { brain.editMemory(JSON.parse(m.data)); } catch (e) { console.warn('[main] memory_edit:', e); }
     });

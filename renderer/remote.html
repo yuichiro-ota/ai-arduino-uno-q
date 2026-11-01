@@ -410,7 +410,7 @@
     if (typeof st.turn_enable === 'boolean') turnEnable.checked = st.turn_enable;
     $('drive-state').textContent = !st.ok ? `STM32 とつながりません(${st.error})`
       : st.fault && st.fault.length ? `${st.fault.join('・')}が回らないので止めました(引っかかり・配線を確認)`
-      : (st.test ? `${st.test}を試し回し中` : st.turn ? '人の方を向いています' : 'つながっています') +
+      : (st.test ? `${st.test}を試し回し中` : st.turn ? '人の方を向いています' : st.move ? `少し動いています(${{ forward: '前', back: '後ろ', left: '左', right: '右' }[st.move]})` : 'つながっています') +
         `・車輪の速さ[m/s] ${['左前', '右前', '左後', '右後'].map((w, i) => `${w} ${st.speed[i].toFixed(2)}`).join(' ')}` +
         `・B相 ${st.enc_b && st.enc_b.length ? st.enc_b.join('・') : 'まだ'}`;
   });

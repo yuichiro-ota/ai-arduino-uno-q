@@ -53,6 +53,20 @@ const QUIET_RE = /静かに|しずかに|黙って|だまって|黙れ|だまれ
 const RESUME_RE = /(喋っ|しゃべっ|話し)て(も)?(いい|良い|大丈夫|OK|ok)|もう(いい|大丈夫)|(静かにし|黙ら)なくて(いい|大丈夫)|(しゃべ|喋)って$|お話しして/;
 const QUIET_LINES = ['はい、しばらく静かにしていますね。', 'わかりました。少しの間、静かにしていますね。'];
 const RESUME_LINES = ['ありがとうございます。またお話ししますね。', 'はい! またお話ししますね。'];
+// 「後ろに下がって」「前に来て」「左向いて」「右向いて」: 台車で少しだけ動く(LLM を使わずすぐ答える)。
+// 左右は律から見た向き。短い頼み方だけ(長い文や「左向いてる?」のような質問は普通の会話)
+const MOVE_MAX_CHARS = 20;
+const MOVE_COMMANDS = [
+  { action: 'back', re: /(後ろ|うしろ)に?(下が|さが)って|^(ちょっと|少し|すこし|もう少し|もうちょっと)?(下が|さが)って|バックして/,
+    lines: ['はい、少し下がりますね。', 'わかりました。ちょっと下がります。'], motion: 'nod' },
+  { action: 'forward', re: /(前|まえ|こっち|こちら|近く|ちかく)に(来|き)て|(前|まえ)に(出|で)て|(近づ|ちかづ)いて/,
+    lines: ['はい、少し前に行きますね。', 'わかりました。ちょっと近づきます。'], motion: 'happyBounce' },
+  { action: 'left', re: /(左|ひだり)(を|に|の方を?|のほうを?)?(向|む)いて|(左|ひだり)に(回|まわ)って/,
+    lines: ['はい、左を向きますね。', 'わかりました。左ですね。'], motion: 'nod' },
+  { action: 'right', re: /(右|みぎ)(を|に|の方を?|のほうを?)?(向|む)いて|(右|みぎ)に(回|まわ)って/,
+    lines: ['はい、右を向きますね。', 'わかりました。右ですね。'], motion: 'nod' },
+];
+const MOVE_TOO_CLOSE = 0.6;   // [m] 目の前の人がこれより近いと前に出ない
 // 愛称の「りっちゃん」は LLM へは「律ちゃん」として渡す(そのまま渡すと、小さいモデルは相手を「りっちゃん」と呼んでしまう)
 const NICKNAME_RE = /りっちゃん|リッちゃん|リッチャン/g;
 const REPLY_MAX_CHARS = 70;   // 字幕に収まる長さ(システムプロンプトでは60文字以内と指示)
@@ -353,10 +367,12 @@ class RitsuBrain {
   /** persist: { put(key, value), log(obj) } — 記憶と反応の記録を ROS 2 の memory ノードへ送る(kiosk 画面だけ)
    *  onQuery(n) — LLM に問い合わせ中の数(独り言・反応も含む。会話の要約は含まない)が変わったとき */
   /** onInterrupt() — 話しかけられた(しゃべっている独り言などを止める)
-   *  onTurn({reason}) — 台車ごと相手の方を向いてほしい(台車のノードが顔を見ながら回る) */
-  constructor({ act, onStatus, onThinking, onQuery, onInterrupt, onTurn, ctx, persist }) {
+   *  onTurn({reason}) — 台車ごと相手の方を向いてほしい(台車のノードが顔を見ながら回る)
+   *  onMove(action) — 台車で少し動いてほしい('back' / 'forward' / 'left' / 'right') */
+  constructor({ act, onStatus, onThinking, onQuery, onInterrupt, onTurn, onMove, ctx, persist }) {
     this.onInterrupt = onInterrupt || (() => {});
     this.onTurn = onTurn || (() => {});
+    this.onMove = onMove || (() => {});
     this.sideRequests = new Set();   // 独り言・反応の LLM 問い合わせ(話しかけられたら打ち切る)
     // 静かにしている間は、自分から言うセリフ(独り言・反応 = source が idle〜)を言わず、動きだけにする
     this.act = a => act(this.quiet && a.text && String(a.source).startsWith('idle') ? { ...a, text: null } : a);
@@ -414,7 +430,7 @@ class RitsuBrain {
     // 話しかけが最優先: しゃべっている独り言を止め、独り言・反応の問い合わせを打ち切る(LLM を会話に空ける)
     this.onInterrupt();
     for (const c of this.sideRequests) c.abort();
-    if (this._quietCommand(userText)) return;
+    if (this._quietCommand(userText) || this._moveCommand(userText)) return;
     const taught = parseTeach(userText);
     if (taught) this.editMemory({ kind: 'term', op: 'add', ...taught });
     this.busy = true;
@@ -440,6 +456,21 @@ class RitsuBrain {
 
   /** 静かにしている間(QUIET_SEC 秒)か */
   get quiet() { return performance.now() < this.quietUntil; }
+
+  /** 「後ろに下がって」などへの返事と台車の動き(LLM を使わずすぐ答える)。そうだったら true */
+  _moveCommand(userText) {
+    if (userText.length > MOVE_MAX_CHARS || /[?？]|(てる|ている|てない|られる)[のか]?$/.test(userText)) return false;
+    const cmd = MOVE_COMMANDS.find(c => c.re.test(userText));
+    if (!cmd) return false;
+    const close = cmd.action === 'forward' && this.ctx.personPresent && this.ctx.personZ < MOVE_TOO_CLOSE;
+    const text = close ? 'これ以上近づくと、ぶつかってしまいそうです。' : pick(cmd.lines);
+    if (!close) this.onMove(cmd.action);
+    this.history = [...this.history, { role: 'user', content: userText }, { role: 'assistant', content: text }].slice(-12);
+    this.act({ text, motion: close ? 'shakeNo' : cmd.motion, emotion: close ? 'shy' : 'happy', source: 'llm' });
+    this.lastInteraction = this.lastChat = performance.now();
+    this._log({ type: 'move', action: cmd.action, close });
+    return true;
+  }
 
   /** 台車ごと目の前の人の方を向く(静かにしている間・人がいないときは向かない) */
   _turn(reason) {

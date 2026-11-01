@@ -161,6 +161,7 @@ sudo reboot
 | `/odom` | `nav_msgs/Odometry` | 台車 → | エンコーダーから求めた動いた量（`odom` → `base_link`） |
 | `/ritsu/turn` | `std_msgs/String` | 画面の律（kiosk）・入力ページ → 台車 | JSON `{"reason":"greet","sec":8}` 台車ごと人の方を向く |
 | `/ritsu/turn_enable` | `std_msgs/Bool` | 入力ページ → 台車 | 人の方を向くか |
+| `/ritsu/move` | `std_msgs/String` | 画面の律（kiosk） → 台車 | JSON `{"action":"back/forward/left/right"}` 少しだけ動く |
 | `/ritsu/base_test` | `std_msgs/String` | 入力ページ → 台車 | JSON `{"wheel":0-3,"pwm":120,"sec":1}` 1輪だけ回す（配線・向きの確認） |
 | `/ritsu/base_status` | `std_msgs/String` | 台車 → 入力ページ | JSON `{"ok":true,"error":"","fault":[],"enc_b":[B相で向きを読めている車輪],"speed":[4輪 m/s],"cmd":[vx,vy,wz]}` 0.5秒ごと |
 
@@ -253,6 +254,11 @@ Linux 側の `base` サービス（`ros/ritsu_base.py`）が `/cmd_vel` を4輪�
 - 律が「何もしない」を選んだとき、静かにしているとき、`/remote` から話しかけたとき（目の前の人とは限らない）は向かない
 - 顔を見失う・8秒たつ・十字ボタンで動かすとやめる。回る速さは最大 0.4rad/s（約23度/秒、`TURN_MAX`）
 - `/remote` の「動かす」の「人の方を向く」で切り替え、「こっちを向いて」で試せる。人から離れるように回るときは `.env` に `TURN_SIGN=-1`
+
+**頼むと少し動く**: 声やチャットで「ちょっと後ろに下がって」「前に来て」「左向いて」「右向いて」と頼むと、LLM を使わずすぐ返事をして、前後は 15cm・左右は 30度だけゆっくり動く（`/ritsu/move`、`MOVE_DIST` / `MOVE_TURN_DEG`）。
+- 左右は律から見た向き（「左向いて」で律の左へ回る）。「前」はカメラの向き（話している人の方）
+- 動いた量はエンコーダーで測って止め、測れなくても時間で止まる。目の前の人が 60cm より近いときは前に出ない。後ろは見えないので、下がるときは周りに気を付ける
+- 20文字までの短い頼み方だけ（長い文や「左向いてる?」のような質問は普通の会話として答える）
 
 - 環境変数: `TURN_ENABLE`（人の方を向くか、既定 1）・`TURN_MAX`・`TURN_SIGN`、`WHEEL_DIAMETER`（車輪の直径、既定 0.08m）、`WHEEL_LX` / `WHEEL_LY`（車体の中心から前後の軸・左右の車輪まで、既定 0.10m / 0.12m）。実測して `.env` に書くと `/odom` が正確になる。`MAX_LINEAR` / `MAX_ANGULAR`（速さの上限、既定 0.3m/s / 1.2rad/s）
 - arduino-router のソケットは `/var/run/arduino-router.sock` を想定（違うときは compose の `volumes` と `ROUTER_SOCK` を直す）

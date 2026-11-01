@@ -15,6 +15,7 @@
  *   発行 /ritsu/memory_put     std_msgs/String  JSON {"key","value"} 覚えたことを保存 (kioskのみ)
  *   発行 /ritsu/log            std_msgs/String  JSON 来訪・反応・その結果の記録 (kioskのみ)
  *   発行 /ritsu/turn           std_msgs/String  JSON {"reason","sec"} 台車ごと相手の方を向いてと頼む (kioskのみ)
+ *   発行 /ritsu/move           std_msgs/String  JSON {"action":"back/forward/left/right"} 台車で少し動く (kioskのみ)
  *   発行 /ritsu/enroll         std_msgs/String  JSON {"action":"add"|"clear"} マスターの顔の登録 (RITSU.enroll())
  *   声: voice.js が /stt (Whisper) で聞き取り、/tts (VOICEVOX) で読み上げる(kiosk 画面のみ)。聞き取った言葉は
  *       /ritsu/chat_user に from:"voice" で流す
@@ -336,6 +337,8 @@
     },
     // 台車ごと相手の方を向く(台車のノード ritsu_base が顔を見ながら回る。kiosk のみ)
     onTurn: ({ reason }) => { if (RITSU_CFG.kiosk) pubJson('/ritsu/turn', { reason, sec: 8 }); },
+    // 「後ろに下がって」「前に来て」「左向いて」「右向いて」で台車が少し動く(kiosk のみ)
+    onMove: action => { if (RITSU_CFG.kiosk) pubJson('/ritsu/move', { action }); },
     onQuery,
   });
   brain.ping();

@@ -86,4 +86,6 @@ services:
       - TURN_ENABLE=${TURN_ENABLE:-1}               # 律が反応するとき台車ごと人の方を向く(/remote でも切り替えられる)
       - TURN_MAX=${TURN_MAX:-0.4}                   # [rad/s] 向くときの回る速さの上限(0.4 ≒ 1秒に23度)
       - TURN_SIGN=${TURN_SIGN:-1}                   # 人から離れるように回ったら -1
+      - MOVE_DIST=${MOVE_DIST:-0.15}                # [m] 「前に来て」「後ろに下がって」で動く距離
+      - MOVE_TURN_DEG=${MOVE_TURN_DEG:-30}          # [度] 「左向いて」「右向いて」で回る角度
     command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && exec python3 ritsu_base.py"]

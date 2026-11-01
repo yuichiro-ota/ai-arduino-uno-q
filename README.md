@@ -161,6 +161,7 @@ sudo reboot
 | `/odom` | `nav_msgs/Odometry` | 台車 → | エンコーダーから求めた動いた量（`odom` → `base_link`） |
 | `/ritsu/turn` | `std_msgs/String` | 画面の律（kiosk）・入力ページ → 台車 | JSON `{"reason":"greet","sec":8}` 台車ごと人の方を向く |
 | `/ritsu/turn_enable` | `std_msgs/Bool` | 入力ページ → 台車 | 人の方を向くか |
+| `/ritsu/walk` | `std_msgs/String` | 画面の律（kiosk）・入力ページ → 台車 | JSON `{"on":true,"sec":60}` おさんぽモード |
 | `/ritsu/obstacle` | `std_msgs/String` | 人検出 → 台車 | JSON `{"front":0.82,"left":null,"right":1.30}` 前方の障害物までの距離 [m]（null は無し） |
 | `/ritsu/base_event` | `std_msgs/String` | 台車 → 画面の律（kiosk） | JSON `{"type":"blocked","by":"move/manual","dist":0.32,"free":"left/right/null"}` 障害物で前に進むのを止めた |
 | `/ritsu/move` | `std_msgs/String` | 画面の律（kiosk） → 台車 | JSON `{"action":"back/forward/left/right"}` 少しだけ動く |
@@ -263,6 +264,11 @@ Linux 側の `base` サービス（`ros/ritsu_base.py`）が `/cmd_vel` を4輪�
 - 「前に来て」などで止まったら、律が「前に何かあって、これ以上進めません。左のほうは空いています。」と知らせる（空いている側は 4-link-robot の Jev の決め方と同じく、空いている方・両方なら広い方）。十字ボタンのときは `/remote` の「動かす」に「障害物[m] 前 0.32 左 - 右 1.10（前に近いので進みません）」と出る
 - 床と障害物は高さで分けるので、実機に合わせて `.env` に `CAMERA_HEIGHT`（床からカメラまで [m]、既定 1.0）と `CAMERA_PITCH_DEG`（カメラの下向きの角度、既定 0）を書く。`ROBOT_HALF_WIDTH`（台車の幅の半分+余裕、既定 0.2m）、映り込む台車自身を除く `OBSTACLE_MIN`（既定 0.15m）も変えられる。`docker logs ritsu-camera` の5秒ごとのログに `obstacle front=… left=… right=…` が出るので、何も無いのに数字が出るときは高さ・角度を見直す
 - 見えるのは前方（カメラの画角）だけ。後ろと、カメラより低くて近い物（画角の下に入る物）は見えない
+
+**おさんぽモード**: 「お散歩して」「おさんぽしよう」「歩き回って」と頼むか、`/remote` の「動かす」の「おさんぽ」をオンにすると、1分間ゆっくり（0.08m/s、`WALK_SPEED`）前に進み、正面 0.7m（`WALK_CLEAR`）以内に物が見えたら、その場で空いている方へ回って、正面が空いたらまた進む（`/ritsu/walk`）。
+- 向きの決め方は 4-link-robot の Jev と同じ形（`ritsu_base.py` の `walk_decide`。local-jev などに差し替えられる）。後ろは見えないので下がらず、その場で回る。200度回っても正面が空かなければやめる
+- 「止まって」「お散歩おしまい」・スイッチをオフ・十字ボタンを触る・1分たつ・カメラから障害物の知らせが来なくなる、でやめる。時間で終わったときやまわりが見えないときは、律がそう言う
+- 正面 0.4m で前進を止める安全装置はおさんぽ中も働く
 
 **頼むと少し動く**: 声やチャットで「ちょっと後ろに下がって」「前に来て」「左向いて」「右向いて」と頼むと、LLM を使わずすぐ返事をして、前後は 15cm・左右は 30度だけゆっくり動く（`/ritsu/move`、`MOVE_DIST` / `MOVE_TURN_DEG`）。
 - 左右は律から見た向き（「左向いて」で律の左へ回る）。「前」はカメラの向き（話している人の方）

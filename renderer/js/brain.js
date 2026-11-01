@@ -61,6 +61,11 @@ const MOVE_COMMANDS = [
   // 「こっち向いて」: 顔が見えていなくても、最後に見た側へ回って探し、正面まで向き直る
   { action: 'face', re: /(こっち|こちら|私の方|わたしの方|僕の方|ぼくの方|俺の方)を?(向|む)いて/,
     lines: ['はい、そちらを向きますね。', 'はい!'], motion: 'nod' },
+  // おさんぽモード: ゆっくり進み、障害物があれば空いている方へ向きを変える(1分。「止まって」「お散歩おしまい」でやめる)
+  { action: 'walk_off', re: /(お?散歩|おさんぽ|さんぽ)(は|を)?(おしまい|終わり|おわり|やめて|止めて|ストップ)/,
+    lines: ['はい、お散歩はおしまいにしますね。'], motion: 'nod' },
+  { action: 'walk', re: /(お?散歩|おさんぽ|さんぽ)(して|しよう|してきて|に行って|行こう)|(歩き|あるき)(回|まわ)って|うろうろして/,
+    lines: ['はい、少しお散歩してきますね。', 'わーい、お散歩してきます。'], motion: 'happyBounce' },
   // 「止まって」: 動いている途中でも止める(「ちょっと待って」は会話でよく使うので入れない)
   { action: 'stop', re: /^(ちょっと|一旦|いったん)?(止|と)まって|ストップ|停止して|止まれ/,
     lines: ['はい、止まります。', 'わかりました。止まりますね。'], motion: 'nod' },
@@ -392,11 +397,13 @@ class RitsuBrain {
   /** onInterrupt() — 話しかけられた(しゃべっている独り言などを止める)
    *  onTurn({reason, search}) — 台車ごと相手の方を向いてほしい(台車のノードが顔を見ながら回る。
    *                             search: 顔が見えていなくても最後に見た側へ回って探す・小さなずれでも正面まで向く)
-   *  onMove(action) — 台車で少し動いてほしい('back' / 'forward' / 'left' / 'right') */
-  constructor({ act, onStatus, onThinking, onQuery, onInterrupt, onTurn, onMove, ctx, persist }) {
+   *  onMove(action) — 台車で少し動いてほしい('back' / 'forward' / 'left' / 'right' / 'stop')
+   *  onWalk(on) — おさんぽモードを始める / やめる */
+  constructor({ act, onStatus, onThinking, onQuery, onInterrupt, onTurn, onMove, onWalk, ctx, persist }) {
     this.onInterrupt = onInterrupt || (() => {});
     this.onTurn = onTurn || (() => {});
     this.onMove = onMove || (() => {});
+    this.onWalk = onWalk || (() => {});
     this.sideRequests = new Set();   // 独り言・反応の LLM 問い合わせ(話しかけられたら打ち切る)
     // 静かにしている間は、自分から言うセリフ(独り言・反応 = source が idle〜)を言わず、動きだけにする
     this.act = a => act(this.quiet && a.text && String(a.source).startsWith('idle') ? { ...a, text: null } : a);
@@ -535,6 +542,7 @@ class RitsuBrain {
     const close = cmd.action === 'forward' && this.ctx.personPresent && this.ctx.personZ < MOVE_TOO_CLOSE;
     const text = close ? 'これ以上近づくと、ぶつかってしまいそうです。' : pick(cmd.lines);
     if (cmd.action === 'face') this.onTurn({ reason: 'face', search: true });   // 頼まれたので静かにしていても向く
+    else if (cmd.action === 'walk' || cmd.action === 'walk_off') this.onWalk(cmd.action === 'walk');
     else if (!close) this.onMove(cmd.action);
     this.history = [...this.history, { role: 'user', content: userText }, { role: 'assistant', content: text }].slice(-12);
     this.act({ text, motion: close ? 'shakeNo' : cmd.motion, emotion: close ? 'shy' : 'happy', source: 'llm' });
@@ -545,6 +553,12 @@ class RitsuBrain {
   /** 台車からの知らせ(/ritsu/base_event)。頼まれて前に進もうとしたのに障害物で止まったら、そう伝える
    *  (十字ボタンで動かしているときは /remote に出るので言わない) */
   onBaseEvent(e) {
+    if (e && e.type === 'walk' && e.state === 'stop') {   // おさんぽが終わった(頼まれてやめたときは返事済み)
+      const text = { time: 'お散歩おしまいです。楽しかったです。', camera: 'まわりがよく見えないので、お散歩はやめておきますね。',
+                     blocked: 'まわりが通れないので、お散歩はここまでにしますね。' }[e.why];
+      if (text) this.act({ text, motion: e.why === 'time' ? 'happyBounce' : 'shakeNo', emotion: e.why === 'time' ? 'happy' : 'sad', source: 'llm' });
+      return;
+    }
     if (!e || e.type !== 'blocked' || e.by !== 'move') return;
     const side = { left: '左', right: '右' }[e.free];
     const text = '前に何かあって、これ以上進めません。' + (side ? `${side}のほうは空いています。` : '');

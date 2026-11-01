@@ -22,15 +22,20 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
                     前後は MOVE_DIST [m]、左右は MOVE_TURN_DEG 度(左右は律から見た向き)。エンコーダーで測った量で止め、
                     時間でも打ち切る。/cmd_vel(手の操作)が来たらやめる
   /ritsu/person     geometry_msgs/PointStamped  顔の位置(光学座標系 x:右 z:前)
+  /ritsu/walk       std_msgs/String  JSON {"on":true, "sec":60}  おさんぽモード: ゆっくり前に進み、正面 WALK_CLEAR 以内に物が
+                    見えたらその場で空いている方へ回って、空いたらまた進む(後ろは見えないので下がらない)。
+                    sec 秒・「止まって」(/ritsu/move stop)・/cmd_vel(手の操作)・カメラの知らせが途切れたらやめる
   /ritsu/obstacle   std_msgs/String  JSON {"front","left","right"} 前方の障害物までの距離 [m](カメラのノードが出す)
                     front が OBSTACLE_STOP より近い間は、前に進む指令だけ止める(回る・下がるはできる。十字ボタンも同じ)
 発行トピック:
   /odom             nav_msgs/Odometry  frame odom / child base_link
   /ritsu/base_status  std_msgs/String  JSON {"ok":bool, "error":"...", "fault":[...], "enc_b":[...], "speed":[4輪 m/s], "cmd":[vx,vy,wz],
                                                 "turn":"向いている理由" or null, "turn_enable":bool, "move":"動いている向き" or null,
-                                                "obstacle":{"front","left","right"} or null, "blocked":bool}
-  /ritsu/base_event   std_msgs/String  JSON {"type":"blocked","by":"move"|"manual","dist":0.32,"free":"left"|"right"|null}
+                                                "obstacle":{"front","left","right"} or null, "blocked":bool,
+                                                "walk":"forward"|"left"|"right" or null(おさんぽ中の動き)}
+  /ritsu/base_event   std_msgs/String  JSON {"type":"blocked","by":"move"|"manual"|"walk","dist":0.32,"free":"left"|"right"|null}
                       前に進もうとして障害物で止めたとき(画面の律が知らせる)。free は空いている側(両方なら広い方)
+                      JSON {"type":"walk","state":"start"|"stop","why":"time"|"stop"|"manual"|"camera"|"off"} おさんぽの始まり・終わり
                     enc_b は向きを B相で読めている車輪(最初に少し回すと決まる)
 
 環境変数:
@@ -47,6 +52,8 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
   MOVE_DIST       「前に来て」「後ろに下がって」で動く距離 [m] (default 0.15)
   MOVE_TURN_DEG   「左向いて」「右向いて」で回る角度 [度] (default 30)
   OBSTACLE_STOP   正面の障害物がこれより近いと前に進まない [m] (default 0.4)
+  WALK_SPEED      おさんぽで前に進む速さ [m/s] (default 0.08)
+  WALK_CLEAR      おさんぽで、正面の物がこれより近くなったら向きを変える [m] (default 0.7)
 """
 import json
 import math
@@ -85,6 +92,11 @@ MOVE_TURN_SPEED = 0.5                # [rad/s] 左右を向く速さ
 OBSTACLE_STOP = float(os.environ.get("OBSTACLE_STOP", "0.4"))
 OBSTACLE_STALE_SEC = 1.0             # これより古い障害物の知らせは使わない(カメラが止まっている)
 OBSTACLE_FREE = 0.8                  # [m] 左右の物がこれより遠ければ「空いている」
+WALK_SPEED = float(os.environ.get("WALK_SPEED", "0.08"))
+WALK_CLEAR = float(os.environ.get("WALK_CLEAR", "0.7"))
+WALK_TURN_SPEED = 0.5                # [rad/s] おさんぽで向きを変える速さ
+WALK_TURN_MAX_DEG = 200              # 回ってもこれだけで正面が空かなければやめる(囲まれている)
+WALK_SEC_MAX = 600
 MOVE_ACTIONS = {"forward": (MOVE_SPEED, 0.0), "back": (-MOVE_SPEED, 0.0),
                 "left": (0.0, MOVE_TURN_SPEED), "right": (0.0, -MOVE_TURN_SPEED)}
 RATE_HZ = 20
@@ -144,13 +156,15 @@ def main():
     st = {"cmd": (0.0, 0.0, 0.0), "cmd_at": 0.0, "test": None, "last": None, "x": 0.0, "y": 0.0, "th": 0.0,
           "speed": [0.0] * 4, "fault": 0, "enc_b": 0, "ok": False, "error": "", "n": 0, "t": time.monotonic(),
           "person": None, "turn": None, "turn_enable": TURN_ENABLE, "move": None,
-          "obstacle": None, "obstacle_at": 0.0, "blocked": False, "blocked_said": 0.0}
+          "obstacle": None, "obstacle_at": 0.0, "blocked": False, "blocked_said": 0.0, "walk": None}
 
     def on_cmd(msg):
         st["cmd"] = (clamp(msg.linear.x, MAX_LINEAR), clamp(msg.linear.y, MAX_LINEAR), clamp(msg.angular.z, MAX_ANGULAR))
         st["cmd_at"] = time.monotonic()
         st["test"] = None
         st["turn"] = st["move"] = None   # 手の操作を優先する
+        if st["walk"]:
+            stop_walk("manual")
 
     def on_person(msg):
         if msg.point.z > 0:
@@ -186,6 +200,8 @@ def main():
             return
         if action == "stop":
             st["move"] = st["turn"] = None
+            if st["walk"]:
+                stop_walk("stop")
             node.get_logger().info("止まって と頼まれた")
             return
         if action not in MOVE_ACTIONS or st["test"] or time.monotonic() - st["cmd_at"] < 1.0:
@@ -239,6 +255,74 @@ def main():
         st["blocked"] = blocked
         return (0.0 if blocked else vx), vy, wz
 
+    def obstacle_now():
+        o = st["obstacle"]
+        return o if o and time.monotonic() - st["obstacle_at"] < OBSTACLE_STALE_SEC else None
+
+    def event(obj):
+        event_pub.publish(String(data=json.dumps(obj)))
+
+    def on_walk(msg):
+        try:
+            m = json.loads(msg.data)
+            on, sec = bool(m.get("on", True)), min(WALK_SEC_MAX, float(m.get("sec", 60)))
+        except (ValueError, TypeError, AttributeError):
+            return
+        if not on:
+            if st["walk"]:
+                stop_walk("off")
+            return
+        if st["test"]:
+            return
+        if not obstacle_now():
+            node.get_logger().warn("おさんぽ: カメラから障害物の知らせが無いので始めない")
+            event({"type": "walk", "state": "stop", "why": "camera"})
+            return
+        st["walk"] = {"until": time.monotonic() + sec, "phase": "forward", "dir": 1.0, "th": 0.0}
+        st["move"] = st["turn"] = None
+        node.get_logger().info(f"おさんぽ: 始める({sec:.0f}秒)")
+        event({"type": "walk", "state": "start"})
+
+    def stop_walk(why):
+        st["walk"] = None
+        node.get_logger().info(f"おさんぽ: やめる({why})")
+        event({"type": "walk", "state": "stop", "why": why})
+
+    def walk_decide(o):
+        """おさんぽの次の動き(4-link-robot の Jev と同じ形の判断。後ろは見えないので BACK は使わず、その場で回る)。
+        local-jev などに差し替えるときはここを置き換える"""
+        if o["front"] is None or o["front"] >= WALK_CLEAR:
+            return "FORWARD"
+        return "LEFT" if free_side() == "left" else "RIGHT" if free_side() == "right" else (
+            "LEFT" if (o["left"] or 9.0) >= (o["right"] or 9.0) else "RIGHT")
+
+    def walk_cmd():
+        """おさんぽ中の (vx, wz)。やめたら None"""
+        w = st["walk"]
+        if not w:
+            return None
+        o = obstacle_now()
+        if time.monotonic() > w["until"]:
+            stop_walk("time")
+            return None
+        if not o:
+            stop_walk("camera")          # 見えないまま進まない
+            return None
+        if w["phase"] == "forward":
+            act = walk_decide(o)
+            if act == "FORWARD":
+                return WALK_SPEED, 0.0
+            w.update(phase="turn", dir=1.0 if act == "LEFT" else -1.0, th=st["th"])
+            node.get_logger().info(f"おさんぽ: 正面 {o['front']:.2f}m に物 → {'左' if act == 'LEFT' else '右'}へ向きを変える")
+        # 向きを変えている: 正面が空くまで同じ向きに回る(行ったり来たりしない)
+        if o["front"] is None or o["front"] >= WALK_CLEAR + 0.1:
+            w["phase"] = "forward"
+            return WALK_SPEED, 0.0
+        if abs(math.degrees(st["th"] - w["th"])) > WALK_TURN_MAX_DEG:
+            stop_walk("blocked")
+            return None
+        return 0.0, WALK_TURN_SPEED * w["dir"]
+
     def on_turn_enable(msg):
         st["turn_enable"] = bool(msg.data)
         if not msg.data:
@@ -289,12 +373,15 @@ def main():
             st["cmd"] = (0.0, 0.0, 0.0)
             move = move_cmd()
             turn = turn_cmd() if move is None else None
+            walk = walk_cmd() if move is None and turn is None else None
             if move is not None:
                 st["cmd"] = (move[0], 0.0, move[1])
             elif turn is not None:
                 st["cmd"] = (0.0, 0.0, turn)
+            elif walk is not None:
+                st["cmd"] = (walk[0], 0.0, walk[1])
         manual = time.monotonic() - st["cmd_at"] <= CMD_TIMEOUT_SEC
-        vx, vy, wz = guard_forward(*st["cmd"], "manual" if manual else "move" if st["move"] else "turn")
+        vx, vy, wz = guard_forward(*st["cmd"], "manual" if manual else "move" if st["move"] else "walk" if st["walk"] else "turn")
         if st["blocked"] and st["move"] and st["move"]["vx"] > 0:
             st["move"] = None            # 「前に来て」は止めて終わり(障害物の前で待ち続けない)
         v = (vx - vy - LXY * wz, vx + vy + LXY * wz, vx + vy - LXY * wz, vx - vy + LXY * wz)
@@ -360,6 +447,8 @@ def main():
             "move": st["move"]["action"] if st["move"] else None,
             "obstacle": st["obstacle"] if time.monotonic() - st["obstacle_at"] < OBSTACLE_STALE_SEC else None,
             "blocked": st["blocked"],
+            "walk": (None if not st["walk"] else "forward" if st["walk"]["phase"] == "forward"
+                     else "left" if st["walk"]["dir"] > 0 else "right"),
         }, ensure_ascii=False)))
 
     node.create_subscription(Twist, "/cmd_vel", on_cmd, 10)
@@ -369,6 +458,7 @@ def main():
     node.create_subscription(Bool, "/ritsu/turn_enable", on_turn_enable, 10)
     node.create_subscription(String, "/ritsu/move", on_move, 10)
     node.create_subscription(String, "/ritsu/obstacle", on_obstacle, 10)
+    node.create_subscription(String, "/ritsu/walk", on_walk, 10)
     node.create_timer(1.0 / RATE_HZ, tick)
     node.get_logger().info(f"台車: 車輪 直径{WHEEL_R * 2:.3f}m 向き{INVERT} 最大 {MAX_LINEAR}m/s {MAX_ANGULAR}rad/s "
                            f"ソケット {ROUTER_SOCK} 人の方を向く {'する' if TURN_ENABLE else 'しない'}(最大 {TURN_MAX}rad/s)")

@@ -93,4 +93,6 @@ services:
       - MOVE_DIST=${MOVE_DIST:-0.15}                # [m] 「前に来て」「後ろに下がって」で動く距離
       - MOVE_TURN_DEG=${MOVE_TURN_DEG:-30}          # [度] 「左向いて」「右向いて」で回る角度
       - OBSTACLE_STOP=${OBSTACLE_STOP:-0.4}         # [m] 正面の障害物がこれより近いと前に進まない
+      - WALK_SPEED=${WALK_SPEED:-0.08}              # [m/s] おさんぽで前に進む速さ
+      - WALK_CLEAR=${WALK_CLEAR:-0.7}               # [m] おさんぽで、正面の物がこれより近いと向きを変える
     command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && exec python3 ritsu_base.py"]

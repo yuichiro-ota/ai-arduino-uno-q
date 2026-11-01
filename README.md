@@ -242,7 +242,7 @@ Linux 側の `base` サービス（`ros/ritsu_base.py`）が `/cmd_vel` を4輪�
 1. Arduino App Lab で「Create new app」→ `ritsu-base` を作り、`sketch/sketch.ino` に `arduino/ritsu-base/sketch/sketch.ino` を貼って Run（Arduino_RouterBridge はコアに入っているので足さなくてよい）。
    **アプリが動いている間だけ** STM32 が arduino-router に `base_set` を登録する（止めると `method base_set not available`）。アプリ一覧の「⋮」→ **Run at startup** をオンにして、起動時に自動で動かす
 2. `docker compose up -d --build base`。`docker logs -f ritsu-base` で「STM32 とつながらない」が出なければつながっている
-3. 台車を浮かせて、`/remote` の「動かす」→「1輪ずつ試す」で各車輪が前へ進む向きに回るか確かめる。違う車輪が回ったら配線を、逆に回ったら `.env` の `WHEEL_INVERT`（左前,右前,左後,右後。既定 `0,1,0,1`）を直す
+3. 台車を浮かせて、`/remote` の「動かす」→「1輪ずつ試す」で各車輪が前へ進む向きに回るか確かめる。違う車輪が回ったら配線を、逆に回ったら `.env` の `WHEEL_INVERT`（左前,右前,左後,右後。既定 `1,0,1,0`）を直す
 4. 十字ボタンを押している間だけ動く（↺↻ はその場で回る）。離すか画面を閉じると止まり、指令が0.5秒届かなければ台車側でも止まる
 
 - 環境変数: `WHEEL_DIAMETER`（車輪の直径、既定 0.08m）、`WHEEL_LX` / `WHEEL_LY`（車体の中心から前後の軸・左右の車輪まで、既定 0.10m / 0.12m）。実測して `.env` に書くと `/odom` が正確になる。`MAX_LINEAR` / `MAX_ANGULAR`（速さの上限、既定 0.3m/s / 1.2rad/s）

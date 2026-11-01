@@ -20,7 +20,7 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
   WHEEL_DIAMETER  車輪の直径 [m] (default 0.08)
   WHEEL_LX        車体の中心から前輪・後輪の軸までの距離 [m] (default 0.10)
   WHEEL_LY        車体の中心から左右の車輪までの距離 [m] (default 0.12)
-  WHEEL_INVERT    向きが逆の車輪を 1 に。左前,右前,左後,右後 (default 0,1,0,1: 右側は鏡写しに付くため)
+  WHEEL_INVERT    向きが逆の車輪を 1 に。左前,右前,左後,右後 (default 1,0,1,0: 律の台車の配線で前へ進む向き)
   PULSES_PER_REV  車輪1回転のパルス数 (default 440 = 11ライン × 減速1:40、A相の立ち上がり)
   MAX_LINEAR      [m/s] (default 0.3)   MAX_ANGULAR [rad/s] (default 1.2)
 """
@@ -39,7 +39,7 @@ from std_msgs.msg import String
 ROUTER_SOCK = os.environ.get("ROUTER_SOCK", "/var/run/arduino-router.sock")
 WHEEL_R = float(os.environ.get("WHEEL_DIAMETER", "0.08")) / 2
 LXY = float(os.environ.get("WHEEL_LX", "0.10")) + float(os.environ.get("WHEEL_LY", "0.12"))
-INVERT = [-1 if s.strip() == "1" else 1 for s in os.environ.get("WHEEL_INVERT", "0,1,0,1").split(",")][:4]
+INVERT = [-1 if s.strip() == "1" else 1 for s in os.environ.get("WHEEL_INVERT", "1,0,1,0").split(",")][:4]
 PPR = float(os.environ.get("PULSES_PER_REV", "440"))
 MAX_LINEAR = float(os.environ.get("MAX_LINEAR", "0.3"))
 MAX_ANGULAR = float(os.environ.get("MAX_ANGULAR", "1.2"))

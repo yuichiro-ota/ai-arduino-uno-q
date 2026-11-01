@@ -32,6 +32,7 @@ const WheelPins PINS[4] = {
 const unsigned long CMD_TIMEOUT_MS = 500;
 const int PWM_MAX = 220;             // 12V のバッテリーで約10V 相当
 const float FF_PER_PULSE = 255.0 / 2000.0;   // 速さ→PWM の見込み(全開で約2000パルス/秒)
+const int PWM_MIN = 70;              // これより弱いとモーターが動き出さないので、回すときは最初から足す
 const float KP = 0.08, KI = 0.6;     // 速さのずれを PWM に足す割合
 const unsigned long LOOP_MS = 20;    // 速さを測って PWM を決め直す間隔(50回/秒)
 const int STALL_PWM = 150;           // これ以上で回していて
@@ -158,7 +159,7 @@ void loop() {
       } else if (target[i] != 0) {
         const float err = target[i] - speed;
         integ[i] = constrain(integ[i] + err * dt, -PWM_MAX / KI, PWM_MAX / KI);
-        pwm = (int)(target[i] * FF_PER_PULSE + KP * err + KI * integ[i]);
+        pwm = (int)((target[i] > 0 ? PWM_MIN : -PWM_MIN) + target[i] * FF_PER_PULSE + KP * err + KI * integ[i]);
         if (target[i] > 0) pwm = max(pwm, 0); else pwm = min(pwm, 0);   // 逆回しでブレーキはかけない
       }
     }

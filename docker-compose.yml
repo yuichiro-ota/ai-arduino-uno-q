@@ -80,7 +80,7 @@ services:
       - WHEEL_DIAMETER=${WHEEL_DIAMETER:-0.08}      # [m] 車輪の直径
       - WHEEL_LX=${WHEEL_LX:-0.10}                  # [m] 車体の中心から前輪・後輪の軸まで
       - WHEEL_LY=${WHEEL_LY:-0.12}                  # [m] 車体の中心から左右の車輪まで
-      - WHEEL_INVERT=${WHEEL_INVERT:-0,1,0,1}       # 向きが逆の車輪を 1 に(左前,右前,左後,右後)
+      - WHEEL_INVERT=${WHEEL_INVERT:-1,0,1,0}       # 向きが逆の車輪を 1 に(左前,右前,左後,右後)
       - MAX_LINEAR=${MAX_LINEAR:-0.3}               # [m/s]
       - MAX_ANGULAR=${MAX_ANGULAR:-1.2}             # [rad/s]
     command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && exec python3 ritsu_base.py"]

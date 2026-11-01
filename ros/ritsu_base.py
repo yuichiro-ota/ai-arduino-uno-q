@@ -17,7 +17,8 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
                     ずれが TURN_START_DEG 以内なら回らない(目線だけで足りる)。顔を見失う・sec 秒たつ・
                     /cmd_vel(手の操作)が来たらやめる
   /ritsu/turn_enable  std_msgs/Bool  人の方を向くか(/remote の切り替え)
-  /ritsu/move       std_msgs/String  JSON {"action":"back"|"forward"|"left"|"right"}  少しだけ動く(「後ろに下がって」など)
+  /ritsu/move       std_msgs/String  JSON {"action":"back"|"forward"|"left"|"right"|"stop"}  少しだけ動く(「後ろに下がって」など)。
+                    stop は少し動く・人の方を向くのをすぐやめる
                     前後は MOVE_DIST [m]、左右は MOVE_TURN_DEG 度(左右は律から見た向き)。エンコーダーで測った量で止め、
                     時間でも打ち切る。/cmd_vel(手の操作)が来たらやめる
   /ritsu/person     geometry_msgs/PointStamped  顔の位置(光学座標系 x:右 z:前)
@@ -171,6 +172,10 @@ def main():
         try:
             action = json.loads(msg.data)["action"]
         except (ValueError, TypeError, KeyError):
+            return
+        if action == "stop":
+            st["move"] = st["turn"] = None
+            node.get_logger().info("止まって と頼まれた")
             return
         if action not in MOVE_ACTIONS or st["test"] or time.monotonic() - st["cmd_at"] < 1.0:
             return

@@ -56,13 +56,17 @@ const RESUME_LINES = ['ありがとうございます。またお話しします
 // 「後ろに下がって」「前に来て」「左向いて」「右向いて」: 台車で少しだけ動く(LLM を使わずすぐ答える)。
 // 左右は律から見た向き。短い頼み方だけ(長い文や「左向いてる?」のような質問は普通の会話)
 const MOVE_MAX_CHARS = 20;
+const MOVE_QUESTION_RE = /[?？]|(てる|ている|てない|られる|てた|てたよ|てくれた)[のかよね]?$/;   // 質問・様子・過去の話は頼みではない
 const MOVE_COMMANDS = [
   // 「こっち向いて」: 顔が見えていなくても、最後に見た側へ回って探し、正面まで向き直る
   { action: 'face', re: /(こっち|こちら|私の方|わたしの方|僕の方|ぼくの方|俺の方)を?(向|む)いて/,
     lines: ['はい、そちらを向きますね。', 'はい!'], motion: 'nod' },
-  { action: 'back', re: /(後ろ|うしろ)に?(下が|さが)って|^(ちょっと|少し|すこし|もう少し|もうちょっと)?(下が|さが)って|バックして/,
+  // 「止まって」: 動いている途中でも止める(「ちょっと待って」は会話でよく使うので入れない)
+  { action: 'stop', re: /^(ちょっと|一旦|いったん)?(止|と)まって|ストップ|停止して|止まれ/,
+    lines: ['はい、止まります。', 'わかりました。止まりますね。'], motion: 'nod' },
+  { action: 'back', re: /(後ろ|うしろ)に?(下が|さが)って|^(ちょっと|少し|すこし|もう少し|もうちょっと)?(下が|さが)って|バックして|後退して|(後ろ|うしろ)に(行|い)って/,
     lines: ['はい、少し下がりますね。', 'わかりました。ちょっと下がります。'], motion: 'nod' },
-  { action: 'forward', re: /(前|まえ|こっち|こちら|近く|ちかく)に(来|き)て|(前|まえ)に(出|で)て|(近づ|ちかづ)いて/,
+  { action: 'forward', re: /(前|まえ|こっち|こちら|近く|ちかく)に(来|き)て|(前|まえ)に(出|で|行|い|進)|(近づ|ちかづ)いて|前進して|^(ちょっと|少し|すこし)?(進|すす)んで|まっすぐ(行|い|進|すす)/,
     lines: ['はい、少し前に行きますね。', 'わかりました。ちょっと近づきます。'], motion: 'happyBounce' },
   { action: 'left', re: /(左|ひだり)(を|に|の方を?|のほうを?)?(向|む)いて|(左|ひだり)に(回|まわ)って/,
     lines: ['はい、左を向きますね。', 'わかりました。左ですね。'], motion: 'nod' },
@@ -70,6 +74,22 @@ const MOVE_COMMANDS = [
     lines: ['はい、右を向きますね。', 'わかりました。右ですね。'], motion: 'nod' },
 ];
 const MOVE_TOO_CLOSE = 0.6;   // [m] 目の前の人がこれより近いと前に出ない
+// 上の言い方に当てはまらなくても、動きの手がかりがある短い言葉は LLM に7択で1語だけ答えさせて聞き分ける
+// (4-link-robot の Jev と同じく、答えを選択肢に縛って短く返させるので、ふつうの会話よりずっと速い)
+const MOVE_HINT_RE = /前|後ろ|うしろ|左|ひだり|右|みぎ|進|すす|下が|さが|来て|きて|行って|いって|近づ|離れ|はなれ|寄って|よって|回って|まわって|向いて|むいて|止ま|とま|バック|こっち|戻って|もどって/;
+// 頼む言い方で終わる言葉だけ聞き分ける(「右のほうが好き」「後ろの席だった」で動き出さないように)
+const MOVE_REQUEST_RE = /(て|で)(ね|よ|ください|くれる|くれない|ほしい|みて|ちょうだい)?[!！。]?$|おいで|ほしい[!！。]?$|しろ$|なさい$|^(もうちょい|もうちょっと|もう少し|ちょっと)?(前|まえ|後ろ|うしろ|左|ひだり|右|みぎ)(へ|に)?[!！。]?$/;
+// 手や首などの動き・ポーズ、「後ろ向いて」(台車では真後ろを向けない)は聞き分けにかけない
+const MOVE_EXCLUDE_RE = /手|首|頭|顔|足|腕|指|目|口|(後ろ|うしろ)を?(向|む)いて/;
+const MOVE_CLASSIFY_MAX_CHARS = 30;
+const MOVE_CLASSIFY_TIMEOUT_SEC = 2.5;
+const MOVE_CLASSES = { FORWARD: 'forward', BACK: 'back', LEFT: 'left', RIGHT: 'right', FACE: 'face', STOP: 'stop' };
+const MOVE_CLASSIFY_PROMPT = `話しかけられた言葉が、台車に乗ったロボット「律」に体を動かすよう頼んでいるかを判定する。次から1つだけ答える:
+FORWARD = 前に進む・近づく / BACK = 後ろに下がる・離れる / LEFT = 律の左を向く・左に回る / RIGHT = 律の右を向く・右に回る /
+FACE = 話している人の方を向く / STOP = 止まる / NONE = 動く頼みではない(質問・雑談・感想・過去の話)
+例: もうちょい前 → FORWARD / 少し離れてくれる? → BACK / こっちおいで → FORWARD / 左側見て → LEFT / ちょっと寄ってきて → FORWARD /
+そこまででいいよ → STOP / 右のほうが好き → NONE / 昨日は後ろの席だった → NONE / 前に言ったよね → NONE /
+右手を上げて → NONE(手や体の一部の動き・ポーズは NONE) / 後ろ向いて → NONE`;
 // 愛称の「りっちゃん」は LLM へは「律ちゃん」として渡す(そのまま渡すと、小さいモデルは相手を「りっちゃん」と呼んでしまう)
 const NICKNAME_RE = /りっちゃん|リッちゃん|リッチャン/g;
 const REPLY_MAX_CHARS = 70;   // 字幕に収まる長さ(システムプロンプトでは60文字以内と指示)
@@ -435,6 +455,14 @@ class RitsuBrain {
     this.onInterrupt();
     for (const c of this.sideRequests) c.abort();
     if (this._quietCommand(userText) || this._moveCommand(userText)) return;
+    if (MOVE_HINT_RE.test(userText) && MOVE_REQUEST_RE.test(userText) && !MOVE_EXCLUDE_RE.test(userText) &&
+        performance.now() >= this.llmRestUntil) {   // 決まった言い方ではない「動いて」を聞き分ける
+      this.busy = true;                       // (その間に次の話しかけは待たせる。LLM が落ちた直後は待たずに会話へ)
+      this.act({ motion: 'listening' });
+      const moved = await this._classifyMove(userText);
+      this.busy = false;
+      if (moved) { if (this.queue.length) this.chat(this.queue.shift()); return; }
+    }
     const taught = parseTeach(userText);
     if (taught) this.editMemory({ kind: 'term', op: 'add', ...taught });
     this.busy = true;
@@ -463,9 +491,47 @@ class RitsuBrain {
 
   /** 「後ろに下がって」などへの返事と台車の動き(LLM を使わずすぐ答える)。そうだったら true */
   _moveCommand(userText) {
-    if (userText.length > MOVE_MAX_CHARS || /[?？]|(てる|ている|てない|られる)[のか]?$/.test(userText)) return false;
+    if (userText.length > MOVE_MAX_CHARS || MOVE_QUESTION_RE.test(userText)) return false;
     const cmd = MOVE_COMMANDS.find(c => c.re.test(userText));
     if (!cmd) return false;
+    this._doMove(cmd, userText, 'pattern');
+    return true;
+  }
+
+  /** 決まった言い方ではないが動きの手がかりがある短い言葉を、LLM に7択で1語だけ答えさせて聞き分ける。
+   *  動く頼みだったら動いて true(時間切れ・関係ない・LLM が使えないときは false で、ふつうの会話にする) */
+  async _classifyMove(userText) {
+    if (userText.length > MOVE_CLASSIFY_MAX_CHARS || MOVE_QUESTION_RE.test(userText) || !MOVE_HINT_RE.test(userText) ||
+        !MOVE_REQUEST_RE.test(userText) || MOVE_EXCLUDE_RE.test(userText)) return false;
+    const started = performance.now();
+    let label = null;
+    try {
+      const res = await fetch(`${RITSU_CFG.llmUrl}/v1/chat/completions`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(MOVE_CLASSIFY_TIMEOUT_SEC * 1000),
+        body: JSON.stringify({
+          model: RITSU_CFG.llmModel, temperature: 0, max_tokens: 12,
+          messages: [{ role: 'system', content: MOVE_CLASSIFY_PROMPT }, { role: 'user', content: userText }],
+          response_format: { type: 'json_schema', json_schema: { name: 'move', schema: {
+            type: 'object', properties: { action: { type: 'string', enum: [...Object.keys(MOVE_CLASSES), 'NONE'] } },
+            required: ['action'] } } },
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const reply = (await res.json()).choices[0].message.content.toUpperCase();
+      label = (reply.match(/FORWARD|BACK|LEFT|RIGHT|FACE|STOP|NONE/) || [])[0] || null;   // JSON でも1語でも拾う
+    } catch (e) {
+      console.warn('[brain] move classify:', e.message || e);
+    }
+    console.log(`[brain] move classify: ${userText} → ${label} (${((performance.now() - started) / 1000).toFixed(2)}秒)`);
+    const action = MOVE_CLASSES[label];
+    if (!action) return false;
+    this._doMove(MOVE_COMMANDS.find(c => c.action === action), userText, 'llm');
+    return true;
+  }
+
+  /** 動く頼みへの返事と台車の動き */
+  _doMove(cmd, userText, by) {
     const close = cmd.action === 'forward' && this.ctx.personPresent && this.ctx.personZ < MOVE_TOO_CLOSE;
     const text = close ? 'これ以上近づくと、ぶつかってしまいそうです。' : pick(cmd.lines);
     if (cmd.action === 'face') this.onTurn({ reason: 'face', search: true });   // 頼まれたので静かにしていても向く
@@ -473,8 +539,7 @@ class RitsuBrain {
     this.history = [...this.history, { role: 'user', content: userText }, { role: 'assistant', content: text }].slice(-12);
     this.act({ text, motion: close ? 'shakeNo' : cmd.motion, emotion: close ? 'shy' : 'happy', source: 'llm' });
     this.lastInteraction = this.lastChat = performance.now();
-    this._log({ type: 'move', action: cmd.action, close });
-    return true;
+    this._log({ type: 'move', action: cmd.action, close, by });
   }
 
   /** 台車ごと目の前の人の方を向く(静かにしている間・人がいないときは向かない) */

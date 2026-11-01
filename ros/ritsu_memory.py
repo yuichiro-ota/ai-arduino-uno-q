@@ -8,11 +8,11 @@ ritsu_memory.py — 律の記憶と反応の記録 ROS 2 ノード
 事件・事故などの暗い見出しは NEWS_BLOCK の言葉で除く。
 
 購読トピック:
-  /ritsu/memory_put  std_msgs/String  JSON {"key":"today"|"master"|"persona", "value":{...}}  覚えていることを書き換える
+  /ritsu/memory_put  std_msgs/String  JSON {"key":"today"|"master"|"persona"|"knowledge", "value":{...}}  覚えていることを書き換える
   /ritsu/log         std_msgs/String  JSON {"type":"arrive"|"leave"|"react"|"outcome"|..., ...}  反応の記録
                      日付ごとに DATA_DIR/log/YYYY-MM-DD.jsonl へ追記する
 発行トピック:
-  /ritsu/memory      std_msgs/String  JSON {"today":{...}, "master":{...}, "persona":{...}, "stats":{...}, "news":{...}}
+  /ritsu/memory      std_msgs/String  JSON {"today":{...}, "master":{...}, "persona":{...}, "knowledge":{...}, "stats":{...}, "news":{...}}
                      書き換えたとき+5秒ごと。stats は直近 LEARN_DAYS 日の反応の結果
                      {"反応": {"やり方": [回数, 結果の合計]}} (律が反応のやり方を選ぶのに使う)
                      news は {"items":[{"title":"...","cat":"エンタメ"}], "at":"取得時刻"}
@@ -39,7 +39,8 @@ DATA_DIR = os.environ.get("DATA_DIR", "/data")
 LEARN_DAYS = int(os.environ.get("LEARN_DAYS", "30"))
 MEMORY_PATH = os.path.join(DATA_DIR, "memory.json")
 LOG_DIR = os.path.join(DATA_DIR, "log")
-KEYS = ("today", "master", "persona")   # memory_put で書き換えてよい項目(persona: 律が自分について話したこと)
+KEYS = ("today", "master", "persona", "knowledge")   # memory_put で書き換えてよい項目
+#   persona: 律が自分について話したこと / knowledge: 教えてもらった言葉
 MAX_VALUE_BYTES = 20000              # 1項目の大きさの上限(壊れた送信でファイルが膨らまないように)
 PUBLISH_EVERY_SEC = 5
 REPORT_EVERY_SEC = 600               # 反応の結果をログへ出す間隔

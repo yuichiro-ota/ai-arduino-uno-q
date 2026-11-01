@@ -430,6 +430,10 @@
     ros.sub('/ritsu/memory', 'std_msgs/String', m => {
       try { brain.onMemory(JSON.parse(m.data)); } catch (e) { console.warn('[main] memory:', e); }
     });
+    // /remote の「覚えたこと」から直す・消す・足す(記憶を持っている kiosk 画面だけが受ける)
+    if (RITSU_CFG.kiosk) ros.sub('/ritsu/memory_edit', 'std_msgs/String', m => {
+      try { brain.editMemory(JSON.parse(m.data)); } catch (e) { console.warn('[main] memory_edit:', e); }
+    });
     ros.sub('/ritsu/person', 'geometry_msgs/PointStamped', m => {
       camSeenAt = personSeenAt = performance.now();
       if (m.point.z > 0) ctx.onPerson(m.point.z, m.point.x / m.point.z);

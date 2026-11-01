@@ -257,6 +257,32 @@ const MASTER_NOTES_MAX = 12;     // マスターとの会話の要約をいく�
 // 会話が途切れて FACT_IDLE_SEC 秒たち LLM が空いているとき、たまった会話からまとめて抜き出す
 const PERSONA_MAX = 24;          // 律について覚える数(古いものから忘れる)
 const MASTER_FACTS_MAX = 20;     // マスターについて覚える数
+const TERMS_MAX = 40;            // 教えてもらった言葉を覚える数
+// 言葉の教え方(「UNO Q っていうのは、律が動いているコンピューターのことだよ」など)。LLM に任せずその場で覚える
+const TEACH_RES = [
+  /^(.{1,20}?)(?:っていうのは|というのは|って言うのは|っていうのが|とは)[、,\s]*(.{2,80}?)(?:のこと|という意味|って意味|っていう意味)?(?:だよ|です|なんだ|なの|だ|よ|ね)*[。!！]*$/,
+  /^(.{1,20}?)は[、,\s]*(.{2,80}?)(?:のこと|という意味|って意味|っていう意味)(?:だよ|です|なんだ|なの|だ|よ|ね)*[。!！]*$/,
+];
+// 覚えていることを直す言い方(このときは「訂正」で答えるよう、抜き出しの LLM にはっきり伝える)
+const CORRECT_RE = /違う|ちがう|じゃなくて|ではなくて|じゃないよ|間違|まちが|訂正|忘れて/;
+/** 話しかけが言葉の教え方なら { term, meaning } */
+function parseTeach(text) {
+  const t = text.trim().replace(/^(ねえ|あのね|律ちゃん|りっちゃん)[、,\s]*/, '');
+  for (const re of TEACH_RES) {
+    const m = t.match(re);
+    if (m && !/[?？]/.test(t)) return { term: m[1].trim(), meaning: m[2].trim() };
+  }
+  return null;
+}
+/** a の言葉が b に出てくる割合(2文字ずつ比べる。マスターのことがマスター自身の言葉から来ているかを見る) */
+function overlap(a, b) {
+  const grams = t => { const g = new Set(); const s = t.replace(/[\s。、!！?？「」]/g, ''); for (let i = 0; i < s.length - 1; i++) g.add(s.slice(i, i + 2)); return g; };
+  const ga = grams(a), gb = grams(b);
+  if (!ga.size) return 0;
+  let n = 0;
+  for (const g of ga) if (gb.has(g)) n++;
+  return n / ga.size;
+}
 const FACT_IDLE_SEC = 8;
 const FACT_BATCH = 4;            // 一度に見る会話の数
 const MEMORY_WAIT_SEC = 10;      // 起動後この秒数のうちに保存した記憶が届かなければ、空の記憶で始める
@@ -317,6 +343,8 @@ function parseDecision(reply, motions, allowWait) {
   if (!emotion && !motion && !text) return null;
   return { emotion: emotion || 'happy', motion: motion || motions[0], text };
 }
+
+const dateLabel = (d = new Date()) => `${d.getMonth() + 1}月${d.getDate()}日`;
 
 class RitsuBrain {
   /** act({text, motion, emotion, source}) でキャラに反映。onStatus(true | 'slow' | false) でLLMランプ更新、
@@ -381,6 +409,8 @@ class RitsuBrain {
     this.onInterrupt();
     for (const c of this.sideRequests) c.abort();
     if (this._quietCommand(userText)) return;
+    const taught = parseTeach(userText);
+    if (taught) this.editMemory({ kind: 'term', op: 'add', ...taught });
     this.busy = true;
     this.lastChat = performance.now();
     this.onThinking(true);
@@ -392,7 +422,8 @@ class RitsuBrain {
     const { text, motion, emotion, ok } = await this._complete(userText.replace(NICKNAME_RE, '律ちゃん'));
     if (ok) {
       this.visitLog = [...this.visitLog, [userText, text]].slice(-10);
-      this.factQueue = [...this.factQueue, { user: userText, reply: text, master: this.ctx.isMaster }].slice(-FACT_BATCH * 3);
+      this.factQueue = [...this.factQueue, { user: userText, reply: text, master: this.ctx.isMaster,
+                                             correct: CORRECT_RE.test(userText) }].slice(-FACT_BATCH * 3);
     }
     this.act({ text, motion, emotion, source: ok ? 'llm' : 'fallback' });
     this.lastInteraction = this.lastChat = performance.now();
@@ -456,8 +487,8 @@ class RitsuBrain {
     }
   }
 
-  _systemPrompt({ news = false } = {}) {
-    const mem = this._memoryText();
+  _systemPrompt({ news = false, about = '' } = {}) {
+    const mem = this._memoryText(about);
     return SYSTEM_PROMPT + (this.ctx.isMaster ? `\n${MASTER_PROMPT}` : '') +
            `\n\n# 今の状況\n${this.ctx.describe(new Date(), { news })}` + (mem ? `\n\n# 覚えていること\n${mem}` : '');
   }
@@ -469,7 +500,7 @@ class RitsuBrain {
   }
 
   async _complete(userText) {
-    const messages = [{ role: 'system', content: this._systemPrompt({ news: NEWS_RE.test(userText) }) },
+    const messages = [{ role: 'system', content: this._systemPrompt({ news: NEWS_RE.test(userText), about: userText }) },
                       ...this.history.slice(-6),
                       { role: 'user', content: userText }];
     const reply = await this._request(messages, 0.9);
@@ -853,7 +884,8 @@ motion は次から選ぶ: ${motions.join(', ')}
     if (this.memoryLoaded) return;
     this.memoryLoaded = true;
     const local = this.memory;
-    this.memory = { today: m.today || null, master: m.master || null, persona: m.persona || null };
+    this.memory = { today: m.today || null, master: m.master || null, persona: m.persona || null,
+                    knowledge: m.knowledge || null };
     // 届く前に覚えたこと(起動直後の来訪など)を足す
     if (local.today) {
       const t = this._today();
@@ -861,6 +893,10 @@ motion は次から選ぶ: ${motions.join(', ')}
       t.notes = [...t.notes, ...local.today.notes].slice(-TODAY_NOTES_MAX);
       t.master = t.master || local.today.master;
       this._put('today');
+    }
+    if (local.knowledge) {
+      for (const t of local.knowledge.terms) this._addTerm(t);
+      this._put('knowledge');
     }
     if (local.persona) {
       const p = this._persona();
@@ -909,28 +945,140 @@ motion は次から選ぶ: ${motions.join(', ')}
     return this.memory.persona;
   }
 
+  /** 教えてもらった言葉 { terms: [{ term, meaning, date }] } */
+  _knowledge() {
+    if (!this.memory.knowledge) this.memory.knowledge = { terms: [] };
+    return this.memory.knowledge;
+  }
+
+  /** 言葉を覚える(同じ言葉は新しい意味で置き換える) */
+  _addTerm({ term, meaning, date }) {
+    const terms = this._knowledge().terms;
+    const i = terms.findIndex(t => t.term === term);
+    if (i >= 0) terms.splice(i, 1);
+    terms.push({ term, meaning, date: date || dateLabel() });
+    terms.splice(0, Math.max(0, terms.length - TERMS_MAX));
+  }
+
+  /** 覚えたことを直す・消す・足す(/remote の「覚えたこと」と、会話での訂正から)。
+   *  { kind: 'persona'|'master'|'term', op: 'add'|'update'|'delete', old: 直す前の内容(言葉なら term), text, term, meaning } */
+  editMemory({ kind, op, old, text, term, meaning }) {
+    const str = (v, n) => typeof v === 'string' ? v.trim().slice(0, n) : '';
+    const list = kind === 'persona' ? this._persona().facts : kind === 'master' ? this._master().facts
+               : kind === 'term' ? this._knowledge().terms : null;
+    if (!list || !['add', 'update', 'delete'].includes(op)) return false;
+    const label = f => kind === 'term' ? f.term : f.text;
+    const i = list.findIndex(f => label(f) === old);
+    const item = kind === 'term' ? { term: str(term, 30), meaning: str(meaning, 80), date: dateLabel() }
+                                 : { text: str(text, 40), date: dateLabel() };
+    if (op !== 'delete' && !(kind === 'term' ? item.term && item.meaning : item.text)) return false;
+    if (op !== 'add' && i < 0) return false;
+    if (op === 'delete') list.splice(i, 1);
+    else if (kind === 'term') { if (op === 'update') list.splice(i, 1); this._addTerm(item); }
+    else if (op === 'update') list[i] = item;
+    else {
+      if (list.some(f => f.text === item.text)) return false;   // もう覚えている
+      list.push(item);
+      list.splice(0, Math.max(0, list.length - (kind === 'persona' ? PERSONA_MAX : MASTER_FACTS_MAX)));
+    }
+    this._put(kind === 'term' ? 'knowledge' : kind);
+    console.log('[brain] memory edit:', kind, op, old || '', '→', kind === 'term' ? `${item.term} = ${item.meaning}` : item.text);
+    return true;
+  }
+
+  /** 覚えていることの一覧 [{ kind, old, show, body }](訂正で番号を付けて見せる) */
+  _knownList(master) {
+    return [
+      ...this._persona().facts.map(f => ({ kind: 'persona', old: f.text, show: `律: ${f.text}`, body: f.text })),
+      ...(master ? this._master().facts.map(f => ({ kind: 'master', old: f.text, show: `マスター: ${f.text}`, body: f.text })) : []),
+      ...this._knowledge().terms.map(t => ({ kind: 'term', old: t.term, show: `用語: ${t.term} = ${t.meaning}`, body: `${t.term} = ${t.meaning}` })),
+    ];
+  }
+
+  /** 「違うよ」「AじゃなくてB」で、覚えていることを直す。
+   *  まず「AじゃなくてB」の A を覚えていることから探して B に置き換える(声の聞き違いはこれで直る)。
+   *  見つからなければ、どれをどう直すかだけを LLM に1行で答えさせる */
+  async _correct({ user, master }) {
+    const known = this._knownList(master);
+    if (!known.length) return;
+    const apply = (k, body) => {
+      if (k.kind === 'term') {
+        const t = body.match(/^(.+?)\s*[=＝]\s*(.+)$/);
+        return t && this.editMemory({ kind: 'term', op: 'update', old: k.old, term: t[1], meaning: t[2] });
+      }
+      return this.editMemory({ kind: k.kind, op: 'update', old: k.old, text: body });
+    };
+    const sw = user.replace(/^(違う|ちがう)(よ|って|の)?[、,\s]*/, '').match(/^(.+?)(?:じゃなくて|ではなくて|じゃなく)[、,\s]*(.+?)(?:だよ|です|だって|だ|よ|ね|なの)*[。!！]*$/);
+    if (sw) {
+      const a = sw[1].replace(/[はがをの]$/, ''), b = sw[2].trim();
+      // 「趣味は歌じゃなくて雲を眺めること」: 「趣味は」で始まる覚えていることの後ろを丸ごと置き換える
+      const xa = a.match(/^(?:律の|りっちゃんの|律ちゃんの|僕の|ぼくの|俺の|私の|わたしの|マスターの)?(.{2,15}?)は(.+)$/);
+      const kx = xa && known.find(x => x.kind !== 'term' && x.body.startsWith(`${xa[1]}は`));
+      if (kx && apply(kx, `${xa[1]}は${b}`)) return console.log('[brain] corrected:', kx.body, '→', `${xa[1]}は${b}`);
+      for (let n = a.length; n >= 2; n--) {           // A の後ろの方から、覚えていることに出てくる一番長い部分を探す
+        const part = a.slice(a.length - n);
+        const k = known.find(x => x.body.includes(part));
+        if (k && apply(k, k.body.split(part).join(b))) return console.log('[brain] corrected:', part, '→', b);
+      }
+    }
+    // 「(律の)好きな花はひまわりだよ」: 「好きな花は」で始まる覚えていることを置き換える(僕・私ならマスター、律なら律のこと)
+    const body = user.replace(/^(違う|ちがう)(よ|って|の)?[、,\s]*/, '');
+    const xy = body.match(/^(律の|りっちゃんの|律ちゃんの|僕の|ぼくの|俺の|私の|わたしの|マスターの)?(.{2,15}?)は[、,\s]*(.+?)(?:だよ|です|だって|だ|よ|ね|なの)*[。!！]*$/);
+    if (xy) {
+      const whose = !xy[1] ? null : /律|りっちゃん/.test(xy[1]) ? 'persona' : 'master';
+      const k = known.find(x => x.kind !== 'term' && (!whose || x.kind === whose) && x.body.startsWith(`${xy[2]}は`));
+      if (k && apply(k, `${xy[2]}は${xy[3].trim()}`)) return console.log('[brain] corrected:', k.body, '→', `${xy[2]}は${xy[3]}`);
+    }
+    const prompt = `覚えていること:
+${known.map((k, i) => `[${i + 1}] ${k.show}`).join('\n')}
+
+${master ? 'マスター' : '相手'}の言葉: 「${user}」
+この言葉は、上のどれを直していますか。番号と、直したあとの文を1行だけ書く。
+例: 「違うよ、好きな色は青だよ」なら → [2] 好きな色は青
+消してほしいだけなら「[番号] 削除」。どれも直していなければ「なし」。`;
+    this.learning = true;
+    const reply = await this._request([{ role: 'system', content: 'あなたは覚えていることを直す係です。指定の形式の1行だけを書きます。' },
+                                       { role: 'user', content: prompt }], 0.1, RITSU_CFG.llmTimeoutSec, true, true);
+    this.learning = false;
+    const m = reply && reply.match(/\[\s*(\d+)\s*\]\s*(.+)/);
+    const k = m && known[+m[1] - 1];
+    if (!k) return;
+    const fixed = m[2].replace(/^(律|マスター|用語)\s*[:：]\s*/, '').replace(/[。.]+$/, '').trim();
+    if (/^削除/.test(fixed)) this.editMemory({ kind: k.kind, op: 'delete', old: k.old });
+    else if (!/正しい内容|直したあと/.test(fixed)) apply(k, fixed);   // 例の言葉を写しただけのものは使わない
+    console.log('[brain] corrected:', reply.trim());
+  }
+
   /** たまった会話から、律自身のこととマスターのことを抜き出して覚える(会話が途切れて LLM が空いているときだけ) */
   async _learnFacts() {
     if (!this.factQueue.length || this.learning || this.busy || !this._llmFree() ||
         (performance.now() - this.lastChat) / 1000 < FACT_IDLE_SEC) return;
+    const fixItem = this.factQueue.find(b => b.correct);
+    if (fixItem) {                       // 訂正は専用の処理で(一度に1つ)
+      this.factQueue = this.factQueue.filter(b => b !== fixItem);
+      return this._correct(fixItem);
+    }
     const batch = this.factQueue.splice(0, FACT_BATCH);
     const anyMaster = batch.some(b => b.master);
-    const persona = this._persona().facts.map(f => f.text);
-    const master = this._master().facts.map(f => f.text);
+    // 覚えていることに番号を付けて見せ、訂正・削除は番号で答えさせる
+    const known = this._knownList(anyMaster);
+    const who = anyMaster ? 'マスター' : '相手';
     const transcript = batch.map(b => `${b.master ? 'マスター' : '相手'}: ${b.user}\n律: ${b.reply}`).join('\n');
-    const prompt = `次の会話から、ずっと覚えておく事実だけを抜き出してください。
-- 「律:」で始まる行: 律が自分について言ったこと(好きなもの・苦手なもの・趣味・得意なこと・普段していること・考え方)
-${anyMaster ? '- 「マスター:」で始まる行: マスターが自分について言ったこと(好きなもの・趣味・仕事・予定など)\n' : ''}- 1行に1つ、25文字以内、言い切りの形で(例: 律: 好きな食べ物はいちご / マスター: 猫を飼っている)
-- 挨拶・気分・天気・その場だけの話は書かない。下の「覚えていること」と同じ内容や矛盾する内容は書かない
-- 何も無ければ「なし」とだけ書く
+    const prompt = `次の会話から、ずっと覚えておくことだけを書き出してください。1行に1つ、次の形だけを使う:
+- 律: 律が自分について言ったこと(好きなもの・苦手なもの・趣味・得意なこと・普段していること)。例: 律: 好きな食べ物はいちご
+${anyMaster ? '- マスター: マスターが自分について言ったこと(好きなもの・趣味・仕事など)。例: マスター: 猫を飼っている\n' : ''}- 用語: ${who}が教えてくれた言葉の意味。例: 用語: UNO Q = 律が動いている小さなコンピューター
+- 訂正 [番号]: ${who}が「違う」「間違っている」と直したとき、下の覚えていることの正しい内容。例: 訂正 [2]: 律: 好きな食べ物はみかん
+- 削除 [番号]: ${who}が「忘れて」「それは違う」と言ったとき
+各行25文字くらいまで。挨拶・気分・天気・その場だけの話は書かない。覚えていることと同じ内容は書かない。何も無ければ「なし」とだけ書く
 
-覚えていること(律): ${persona.join(' / ') || 'なし'}
-${anyMaster ? `覚えていること(マスター): ${master.join(' / ') || 'なし'}\n` : ''}
+覚えていること:
+${known.map((k, i) => `[${i + 1}] ${k.show}`).join('\n') || 'なし'}
+
 会話:
 ${transcript}`;
     this.learning = true;
     const startedChat = this.lastChat;
-    const reply = await this._request([{ role: 'system', content: 'あなたは会話から事実を抜き出す係です。日本語で、指定の形式だけを書きます。' },
+    const reply = await this._request([{ role: 'system', content: 'あなたは会話から覚えることを書き出す係です。日本語で、指定の形式だけを書きます。' },
                                        { role: 'user', content: prompt }], 0.2, RITSU_CFG.llmTimeoutSec, true, true);
     this.learning = false;
     if (!reply) {                // 話しかけられて打ち切ったなら、あとでもう一度
@@ -938,27 +1086,42 @@ ${transcript}`;
       return;
     }
     const norm = t => t.replace(/[\s。、!！?？「」]/g, '');
-    const add = (key, list, max, text) => {
-      const n = norm(text);
-      if (!n || list.some(f => norm(f.text) === n || norm(f.text).includes(n) || n.includes(norm(f.text)))) return false;
-      const d = new Date();
-      list.push({ text, date: `${d.getMonth() + 1}月${d.getDate()}日` });
-      list.splice(0, Math.max(0, list.length - max));
-      return true;
+    const dup = (list, text) => list.some(f => { const a = norm(f.text), b = norm(text); return a === b || a.includes(b) || b.includes(a); });
+    const parseItem = body => {           // 「律: 〜」「マスター: 〜」「用語: 言葉 = 意味」
+      const m = body.match(/^(律|マスター|用語)\s*[:：]\s*(.+)$/);
+      if (!m) return null;
+      const v = m[2].replace(/[。.]+$/, '').trim();
+      if (m[1] === '用語') {
+        const t = v.match(/^(.+?)\s*[=＝]\s*(.+)$/) || v.match(/^(.+?)(?:は|とは|って)\s*(.+)$/);
+        return t ? { kind: 'term', term: t[1].trim(), meaning: t[2].trim() } : null;
+      }
+      return { kind: m[1] === '律' ? 'persona' : 'master', text: v };
     };
-    let p = false, m = false;
-    for (const line of reply.split('\n')) {
-      const hit = line.replace(/^[\s\-・*]+/, '').match(/^(律|マスター)\s*[:：]\s*(.+)$/);
-      if (!hit) continue;
-      const text = hit[2].replace(/[。.]+$/, '').trim().slice(0, 40);
-      if (/^なし$/.test(text)) continue;
-      if (hit[1] === '律') p = add('persona', this._persona().facts, PERSONA_MAX, text) || p;
-      else if (anyMaster) m = add('master', this._master().facts, MASTER_FACTS_MAX, text) || m;
+    const done = [];
+    for (const raw of reply.split('\n')) {
+      const line = raw.replace(/^[\s\-・*]+/, '').trim();
+      if (!line || /^なし$/.test(line)) continue;
+      const fix = line.match(/^(訂正|削除)\s*\[?\s*(\d+)\s*\]?\s*[:：]?\s*(.*)$/);
+      if (fix) {
+        const k = known[+fix[2] - 1];
+        if (!k) continue;
+        if (fix[1] === '削除') { if (this.editMemory({ kind: k.kind, op: 'delete', old: k.old })) done.push(line); continue; }
+        const it = parseItem(fix[3]) || (k.kind === 'term' ? null : { kind: k.kind, text: fix[3].replace(/[。.]+$/, '').trim() });
+        if (it && it.kind === k.kind && this.editMemory({ ...it, op: 'update', old: k.old })) done.push(line);
+        continue;
+      }
+      const it = parseItem(line);
+      if (!it || /^なし$/.test(it.text || it.meaning)) continue;
+      // マスターのことは、マスター自身が言ったことだけ(律の返事から作られたもの・律のこと・ほかの人のことは入れない)
+      if (it.kind === 'master' && (!anyMaster || it.text.includes('律') ||
+                                   overlap(it.text, batch.filter(b => b.master).map(b => b.user).join(' ')) < 0.3)) continue;
+      if (it.kind === 'persona' && dup(this._persona().facts, it.text)) continue;
+      if (it.kind === 'master' && dup(this._master().facts, it.text)) continue;
+      if (this.editMemory({ ...it, op: 'add' })) done.push(line);
     }
-    if (p) this._put('persona');
-    if (m) this._put('master');
-    if (p || m) console.log('[brain] learned:', reply.replace(/\n/g, ' / '));
+    if (done.length) console.log('[brain] learned:', done.join(' / '));
   }
+
 
   _bumpToday(key) { this._today()[key]++; this._put('today'); }
 
@@ -984,8 +1147,17 @@ ${transcript}`;
   }
 
   /** システムプロンプトに入れる「覚えていること」 */
-  _memoryText() {
+  /** about: 今の話しかけ(出てきた言葉は意味まで渡す。ほかの言葉は名前だけ) */
+  _memoryText(about = '') {
     const lines = [];
+    const terms = this.memory.knowledge ? this.memory.knowledge.terms : [];
+    if (terms.length) {
+      const near = [about, ...this.history.slice(-4).map(h => h.content)].join(' ');
+      const hit = terms.filter(t => near.includes(t.term));
+      const rest = terms.filter(t => !hit.includes(t));
+      if (hit.length) lines.push(`教えてもらった言葉(説明するときはこの意味で): ${hit.map(t => `${t.term} = ${t.meaning}`).join(' / ')}`);
+      if (rest.length) lines.push(`ほかに教えてもらった言葉: ${rest.map(t => t.term).join('、')}`);
+    }
     const persona = [...(RITSU_CFG.persona || []), ...(this.memory.persona ? this.memory.persona.facts.map(f => f.text) : [])];
     if (persona.length) lines.push(`律自身のこと(前に自分で言ったこと。聞かれたら必ずこれと同じ答えにし、矛盾することは言わない): ${persona.join(' / ')}`);
     const t = this.memory.today;

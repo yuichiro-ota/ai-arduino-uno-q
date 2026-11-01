@@ -90,6 +90,9 @@
                   font-size: 15px; font-weight: 700; height: 52px; touch-action: none; user-select: none; -webkit-user-select: none; }
   #drive .pad button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
   #drive .pad .stop { background: #f3e1e6; }
+  #drive .halt { display: block; width: 100%; margin: 8px 0 4px; height: 48px; border: none; border-radius: 14px;
+                 background: #e5484d; color: #fff; font-size: 18px; font-weight: 800; letter-spacing: 0.2em; }
+  #drive .halt:active { transform: scale(0.98); }
   #drive .speed { display: flex; gap: 8px; justify-content: center; align-items: center; }
   #drive .wheels { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 8px; }
   #drive .wheels button { height: 38px; font-size: 13px; }
@@ -180,6 +183,7 @@
 </section>
 
 <section id="drive">
+  <button type="button" class="halt" id="halt">停止</button>
   <div class="pad">
     <button data-v="0,0,1">↺</button><button data-v="1,0,0">前</button><button data-v="0,0,-1">↻</button>
     <button data-v="0,1,0">左</button><button class="stop" data-v="0,0,0">止</button><button data-v="0,-1,0">右</button>
@@ -404,6 +408,12 @@
   turnEnable.addEventListener('change', () => ros.pub('/ritsu/turn_enable', 'std_msgs/Bool', { data: turnEnable.checked }));
   $('turn-now').addEventListener('click', () =>
     ros.pub('/ritsu/turn', 'std_msgs/String', { data: JSON.stringify({ reason: 'remote', sec: 12, search: true }) }));
+  // 停止: 律を通さずに台車へ直接「止まって」を送る(少し動く・人の方を向く・おさんぽを全部やめる)
+  $('halt').addEventListener('click', () => {
+    stopDrive();
+    ros.pub('/ritsu/move', 'std_msgs/String', { data: JSON.stringify({ action: 'stop' }) });
+    ros.pub('/ritsu/walk', 'std_msgs/String', { data: JSON.stringify({ on: false }) });
+  });
   // おさんぽ: 1分間、障害物をよけながら動き回る(十字ボタンを触る・「止まって」でもやめる)
   const walk = $('walk');
   walk.addEventListener('change', () =>

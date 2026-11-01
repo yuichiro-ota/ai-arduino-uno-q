@@ -56,6 +56,8 @@ const RESUME_LINES = ['ありがとうございます。またお話しします
 // 「後ろに下がって」「前に来て」「左向いて」「右向いて」: 台車で少しだけ動く(LLM を使わずすぐ答える)。
 // 左右は律から見た向き。短い頼み方だけ(長い文や「左向いてる?」のような質問は普通の会話)
 const MOVE_MAX_CHARS = 20;
+// 「止まって」「停止して」「ストップ」: 返事を考えている途中でも順番待ちを飛ばして、すぐ台車を止める
+const STOP_RE = /(止|と)まって|(止|と)まれ|ストップ|すとっぷ|停止/;
 const MOVE_QUESTION_RE = /[?？]|(てる|ている|てない|られる|てた|てたよ|てくれた)[のかよね]?$/;   // 質問・様子・過去の話は頼みではない
 const MOVE_COMMANDS = [
   // 「こっち向いて」: 顔が見えていなくても、最後に見た側へ回って探し、正面まで向き直る
@@ -67,7 +69,7 @@ const MOVE_COMMANDS = [
   { action: 'walk', re: /(お?散歩|おさんぽ|さんぽ)(して|しよう|してきて|に行って|行こう)|(歩き|あるき)(回|まわ)って|うろうろして/,
     lines: ['はい、少しお散歩してきますね。', 'わーい、お散歩してきます。'], motion: 'happyBounce' },
   // 「止まって」: 動いている途中でも止める(「ちょっと待って」は会話でよく使うので入れない)
-  { action: 'stop', re: /^(ちょっと|一旦|いったん)?(止|と)まって|ストップ|停止して|止まれ/,
+  { action: 'stop', re: STOP_RE,
     lines: ['はい、止まります。', 'わかりました。止まりますね。'], motion: 'nod' },
   { action: 'back', re: /(後ろ|うしろ)に?(下が|さが)って|^(ちょっと|少し|すこし|もう少し|もうちょっと)?(下が|さが)って|バックして|後退して|(後ろ|うしろ)に(行|い)って/,
     lines: ['はい、少し下がりますね。', 'わかりました。ちょっと下がります。'], motion: 'nod' },
@@ -453,6 +455,10 @@ class RitsuBrain {
   async chat(userText, { from } = {}) {
     userText = userText.trim();
     if (!userText) return;
+    if (userText.length <= MOVE_MAX_CHARS && STOP_RE.test(userText) && !MOVE_QUESTION_RE.test(userText)) {
+      this.onMove('stop');                    // 何をしていても最初に止める(返事より先)
+      if (this.busy) { this.onInterrupt(); return; }   // 返事を考え中なら止めるだけ(しゃべっている独り言も止める)
+    }
     if (from === 'voice') this._turn('voice');
     if (this.busy) {
       if (this.queue.length < QUEUE_MAX) this.queue.push(userText);

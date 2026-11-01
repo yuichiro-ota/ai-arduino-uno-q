@@ -135,6 +135,8 @@ def main():
                 res = router.call("base_set", wheel_targets())
             vals = [int(s) for s in str(res).split(",")]
             pulses, fault, enc_b = vals[:4], vals[4], vals[5] if len(vals) > 5 else 0
+            if not st["ok"]:
+                node.get_logger().info("STM32 とつながった")
             st["ok"], st["error"] = True, ""
         except (OSError, RuntimeError, ValueError) as e:
             if st["ok"] or not st["error"]:

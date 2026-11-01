@@ -225,12 +225,12 @@ Linux 側の `base` サービス（`ros/ritsu_base.py`）が `/cmd_vel` を4輪�
 
 | 車輪 | L298N | EN | IN | エンコーダー A相 / B相 |
 |---|---|---|---|---|
-| 左前 | ① ENA・IN1/IN2・OUT1/OUT2 | D3 | D2 / D4 | D5 / A4 |
+| 左前 | ① ENA・IN1/IN2・OUT1/OUT2 | D3 | D2 / D4 | D11 / A4 |
 | 左後 | ① ENB・IN3/IN4・OUT3/OUT4 | D10 | A0 / A1 | D12 / D0 |
-| 右前 | ② ENA・IN1/IN2・OUT1/OUT2 | D11 | D7 / D8 | D6 / A5 |
+| 右前 | ② ENA・IN1/IN2・OUT1/OUT2 | D5 | D7 / D8 | D6 / A5 |
 | 右後 | ② ENB・IN3/IN4・OUT3/OUT4 | D9 | A2 / A3 | D13 / D1 |
 
-- EN のピンにはスケッチで `pinMode()` をしない（UNO Q では `analogWrite` の PWM が出なくなる）
+- EN のピンにはスケッチで `pinMode()` をしない（UNO Q では `analogWrite` の PWM が出なくなる）。D11 は EN にしたらモーターが鳴るだけで回らなかったので、エンコーダーに使う
 
 - 回った向きは B相で読む。B相の極性は最初に少し回したときに自動で合わせ、読めない車輪は回した向きとみなす（`/remote` の「動かす」に「B相 左前・…」と読めている車輪が出る）
 

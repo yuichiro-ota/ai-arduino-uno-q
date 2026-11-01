@@ -16,7 +16,7 @@
  *
  *   エンコーダーは A相の立ち上がりを数え、そのときの B相で回った向きを決める(押されて逆に回っても正しく数える)。
  *   B相の極性は配線で変わるので、最初に回したとき(B_LEARN パルス)に回した向きと比べて合わせる。
- *   その後、回した向きとほとんど合わなくなったら(線が外れた・極性が途中で変わった) B相を使うのをやめる。
+ *   その後、回した向きと合う割合が B_KEEP を下回ったら(線が外れた・ノイズで読み違える) B相を使うのをやめる。
  */
 #include <Arduino_RouterBridge.h>
 
@@ -40,6 +40,7 @@ const float STALL_SPEED = 40;        // これより遅い[パルス/秒]状態�
 const unsigned long STALL_MS = 1000; // これだけ続いたらロックとみなす
 const int B_LEARN = 200;             // B相の極性を決めるのに使うパルス数(回して数えた分)
 const float B_AGREE = 0.9;           // 回した向きとこれだけ合えば B相を信じる
+const float B_KEEP = 0.8;            // 信じたあと、合う割合がこれを下回ったら B相を使うのをやめる(線の接触不良・ノイズ)
 const unsigned long PULSE_MIN_US = 200;   // これより短い間隔のパルスはモーターのノイズとして数えない
                                           // (全開でも約2600パルス/秒 = 約385µs おき)
 
@@ -93,7 +94,7 @@ void checkB(int i) {
     if (agree >= B_AGREE) bPol[i] = 1;
     else if (agree <= 1 - B_AGREE) bPol[i] = -1;
     else bOk[i] = false;                            // どちらとも言えない = B相が読めていない
-  } else if (agree < 1 - B_AGREE) {
+  } else if (agree < B_KEEP) {                      // 読み違いが混ざると数が打ち消し合って遅く見える
     bOk[i] = false;
   }
   bAgree[i] = bTotal[i] = 0;

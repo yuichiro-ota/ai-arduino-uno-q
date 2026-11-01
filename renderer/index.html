@@ -74,6 +74,15 @@
   #status .idle { background: #f2c14e; box-shadow: 0 0 0.4em #f2c14e; border-color: transparent; }
   #status .hidden { display: none; }
   #status .on.paused { opacity: 0.35; box-shadow: none; }
+  /* 話す / 静かにする(「静かに」と言われてから5分)。押すと切り替え */
+  #talk-mode { cursor: pointer; user-select: none; }
+  #talk-mode svg { width: 1.15em; height: 1.15em; fill: none; stroke: #57d9a3; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+  #talk-mode svg .body { fill: #57d9a3; }
+  #talk-mode .mute { display: none; }
+  #talk-mode.quiet svg { stroke: #a99aa2; }
+  #talk-mode.quiet svg .body { fill: #a99aa2; }
+  #talk-mode.quiet .waves { display: none; }
+  #talk-mode.quiet .mute { display: inline; }
 
   /* 音声合成のクレジット(VOICEVOX の利用条件) */
   #credit { position: fixed; right: 1.2vw; bottom: 4px; font-size: clamp(10px, 1.6vw, 18px); color: rgba(90,74,82,0.55); z-index: 11; }
@@ -94,6 +103,13 @@
   <div class="lamp"><div class="dot" id="lamp-ros"></div>ROS</div>
   <div class="lamp"><div class="dot" id="lamp-cam"></div>CAMERA</div>
   <div class="lamp hidden" id="lamp-mic-wrap"><div class="dot" id="lamp-mic"></div>MIC</div>
+  <div class="lamp" id="talk-mode" title="押すと 話す / 静かにする を切り替え">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path class="body" d="M3 9h4l5-4v14l-5-4H3z"/>
+      <path class="waves" d="M15.5 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11"/>
+      <path class="mute" d="M16 9.5l5 5M21 9.5l-5 5"/>
+    </svg><span id="talk-mode-text">話す</span>
+  </div>
 </div>
 <div id="credit"></div>
 

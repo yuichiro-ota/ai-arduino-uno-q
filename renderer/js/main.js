@@ -333,6 +333,22 @@
   brain.ping();
   brain.startIdle();
 
+  /* ===== 話す / 静かにする =====
+   * スピーカーの絵: 緑で音が出ている=話す / 灰色に×=静かにしている(残りの分も出す)。押すと切り替え */
+  const talkMode = document.getElementById('talk-mode');
+  const talkModeText = document.getElementById('talk-mode-text');
+  const updateTalkMode = () => {
+    const quiet = brain.quiet;
+    talkMode.classList.toggle('quiet', quiet);
+    talkModeText.textContent = quiet ? `静か ${Math.ceil((brain.quietUntil - performance.now()) / 60000)}分` : '話す';
+  };
+  talkMode.addEventListener('click', () => {
+    if (brain.quiet) brain.setQuiet(0);
+    else brain.setQuiet();
+    updateTalkMode();
+  });
+  setInterval(updateTalkMode, 1000);
+
   /* ===== 声 (voice.js) =====
    * MICランプ: 緑=聞いている / 薄い緑=今は聞いていない(人が映っていない・律が話している・返事を考え中) /
    *           黄=声を聞き取り中・文字にしている / 灰=マイクが使えない */

@@ -21,11 +21,12 @@
 #include <Arduino_RouterBridge.h>
 
 // ---- ピン(EN は PWM の出るピン) ----
+// D5・D6 は UNO Q で analogWrite の PWM が出なかったので EN に使わず、エンコーダーの A相に回す
 struct WheelPins { uint8_t en, in1, in2, enc, encB; };
 const WheelPins PINS[4] = {
-  {3, 2, 4, 10, A4},    // 左前
-  {5, 7, 8, 11, A5},    // 右前
-  {6, A0, A1, 12, 0},   // 左後
+  {3, 2, 4, 5, A4},     // 左前
+  {10, 7, 8, 6, A5},    // 右前
+  {11, A0, A1, 12, 0},  // 左後
   {9, A2, A3, 13, 1},   // 右後
 };
 

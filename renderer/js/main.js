@@ -314,7 +314,7 @@
       if (motion === 'noticeL' || motion === 'noticeR') startPan(motion === 'noticeR' ? 1 : -1);
       if (motion === 'seeOffL' || motion === 'seeOffR') startPan(motion === 'seeOffR' ? 1 : -1);
       if (text) {
-        // 声で読み上げる: 会話・反応はいつも、独り言は人がいるときだけ(誰もいないのにしゃべり続けないように)
+        // 声で読み上げる: 会話・反応はいつも、独り言は idleAloud か人がいるとき
         const aloud = voice && voice.ttsOk &&
                       (!String(source).startsWith('idle') || ctx.personPresent || RITSU_CFG.voice.idleAloud);
         showSubtitle(text, !aloud);

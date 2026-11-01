@@ -95,4 +95,6 @@ services:
       - OBSTACLE_STOP=${OBSTACLE_STOP:-0.4}         # [m] 正面の障害物がこれより近いと前に進まない
       - WALK_SPEED=${WALK_SPEED:-0.08}              # [m/s] おさんぽで前に進む速さ
       - WALK_CLEAR=${WALK_CLEAR:-0.7}               # [m] おさんぽで、正面の物がこれより近いと向きを変える
+      - FOLLOW_DIST=${FOLLOW_DIST:-1.0}             # [m] フォローで人との間をあける距離
+      - FOLLOW_SPEED=${FOLLOW_SPEED:-0.15}          # [m/s] フォローで前に進む速さの上限
     command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && exec python3 ritsu_base.py"]

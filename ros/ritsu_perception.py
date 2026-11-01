@@ -20,11 +20,20 @@ ritsu_perception.py — 律の人検出 ROS 2 ノード (Orbbec Gemini 335)
   /ritsu/obstacle        std_msgs/String   JSON {"front":0.82,"left":null,"right":1.30} 台車の前方の障害物までの距離 [m]
                          (null は OBSTACLE_RANGE 以内に何も無い)。毎回送る。深度を台車の高さに直して床を除き、
                          front = 台車の幅(ROBOT_HALF_WIDTH)の通り道 / left・right = その外側の斜め前(45度まで)
+  /ritsu/follow_target   std_msgs/String   JSON {"x":0.10,"d":1.20,"face":true,"lost":false,"obstacle":{...}}
+                         フォローモード中だけ毎回送る。ついていく人の位置(x: 右 [m] / d: 前 [m]、床に水平に直した値)。
+                         lost=true は見失っている(x・d は無い)。obstacle はその人を除いた /ritsu/obstacle と同じ形
 
 購読トピック:
   /ritsu/enroll          std_msgs/String   JSON {"action":"add"|"clear"} マスターの顔を登録する/消す。
                          add: カメラの正面に来た一番大きい顔を約4秒で数枚とり、特徴(128個の数値)を保存する
                          (顔の画像は保存しない)。何回か add すると、向きや明るさの違いに強くなる
+  /ritsu/follow          std_msgs/String   JSON {"on":true,"sec":300} フォローモード: ついていく人を決めて追い始める / やめる
+
+  フォローモードの人の追い方: 深度の点を上から見た地図(FOLLOW_CELL 角のマス)にして、つながった「かたまり」に分ける。
+  始めは顔が見えていればその真下のかたまり、見えなければ正面いちばん近くの人くらいの大きさ(幅・高さ)のかたまりを
+  「この人」と決め、あとは前のフレームの位置のすぐ近くのかたまりを追う(台車のカメラは低いので、近くに立つ人の顔は
+  画角の上に出る。追うのは胴体と足)。顔が見えたら、その真下のかたまりで確かめ直す
 
 環境変数:
   CAMERA_ROTATE   0/90/180/270 — カメラを縦置きする場合の回転補正
@@ -83,6 +92,14 @@ OBSTACLE_MIN = float(os.environ.get("OBSTACLE_MIN", "0.15"))
 OBSTACLE_RANGE = 3.0        # [m] これより遠い物は見ない
 OBSTACLE_FLOOR = 0.06       # [m] 床からこれより低い点は床とみなす
 OBSTACLE_POINTS = 12        # 1つの方向でこれだけ点が無ければ「何も無い」(ノイズの点で止まらないように)
+FOLLOW_CELL = 0.05          # [m] フォローで上から見た地図の1マス
+FOLLOW_GATE = 0.45          # [m] 前のフレームの位置からこれ以内のかたまりを同じ人とみなす
+FOLLOW_GATE_LOST = 0.8      # [m] 少し見失ったあとは広げて探す
+FOLLOW_LOCK_DEG = 30        # 始めるとき、正面からこの角度以内の人を選ぶ
+FOLLOW_LOCK_DIST = 2.5      # [m] 始めるとき、これより遠い人は選ばない
+PERSON_WIDTH = (0.15, 0.9)  # [m] 人とみなすかたまりの幅(上から見た左右の広がり)
+PERSON_TOP = 0.9            # [m] 人とみなすには、床からこの高さまで(画角の上に出るならその手前まで)届いている
+FOLLOW_EXCLUDE = 0.4        # [m] ついていく人のまわりのこの範囲は、フォロー用の障害物から除く
 SNAPSHOT_PATH = "/app/debug/camera.jpg"
 
 # ---------------- ROS 2 ----------------
@@ -98,6 +115,7 @@ pub_hand = node.create_publisher(PointStamped, "/ritsu/hand_near", 10)
 pub_person_id = node.create_publisher(String, "/ritsu/person_id", 10)
 pub_enroll = node.create_publisher(String, "/ritsu/enroll_status", 10)
 pub_obstacle = node.create_publisher(String, "/ritsu/obstacle", 10)
+pub_follow = node.create_publisher(String, "/ritsu/follow_target", 10)
 
 
 def publish_point(pub, x, y, z):
@@ -435,9 +453,9 @@ def detect_hand_near(depth, scale, face_box, intr):
     return {"x": (u - cx) / fx * z, "y": (v - cy) / fy * z, "z": z}
 
 
-def detect_obstacles(depth, scale, intr):
-    """台車の前方の障害物までの距離 {"front","left","right"} [m](無ければ None)。1/4 に間引いて軽くする。
-    深度の点をカメラの下向きの角度で水平に直し、床(OBSTACLE_FLOOR より低い)を除いてから方向ごとに近い物を見る"""
+def floor_points(depth, scale, intr):
+    """深度の点をカメラの下向きの角度で水平に直し、床(OBSTACLE_FLOOR より低い)を除いた (x 右, 前, 床からの高さ) [m]。
+    1/4 に間引いて軽くする"""
     fx, fy, cx, cy = intr
     step = 4
     d = depth[::step, ::step].astype(np.float32) * scale / 1000.0
@@ -448,7 +466,16 @@ def detect_obstacles(depth, scale, intr):
     down = y * math.cos(CAMERA_PITCH) + z * math.sin(CAMERA_PITCH)       # 水平に直した下方向
     height = CAMERA_HEIGHT - down
     keep = (height > OBSTACLE_FLOOR) & (fwd > 0)
-    x, fwd = x[keep], fwd[keep]
+    return x[keep], fwd[keep], height[keep]
+
+
+def detect_obstacles(pts, exclude=None):
+    """台車の前方の障害物までの距離 {"front","left","right"} [m](無ければ None)。pts は floor_points の値。
+    exclude=(x, 前) ならそのまわり FOLLOW_EXCLUDE の点を除く(フォローでついていく人を障害物にしない)"""
+    x, fwd, _ = pts
+    if exclude:
+        far = np.hypot(x - exclude[0], fwd - exclude[1]) > FOLLOW_EXCLUDE
+        x, fwd = x[far], fwd[far]
     side = (np.abs(x) > ROBOT_HALF_WIDTH) & (np.abs(x) < fwd)            # 通り道の外で、斜め前45度まで
     out = {}
     for name, sel, dist in (("front", np.abs(x) <= ROBOT_HALF_WIDTH, fwd),
@@ -457,6 +484,100 @@ def detect_obstacles(depth, scale, intr):
         v = dist[sel]
         out[name] = round(float(np.percentile(v, 5)), 2) if v.size >= OBSTACLE_POINTS else None
     return out
+
+
+class FollowTracker:
+    """フォローモードでついていく人を、上から見た深度のかたまりで追う(ファイル先頭の説明を参照)"""
+
+    def __init__(self):
+        self.until = 0.0         # この時刻まで追う(0 = 追っていない)
+        self.pos = None          # ついていく人の (x, 前) [m]。None = まだ決まっていない
+        self.seen = 0.0          # 最後に見つけた時刻
+
+    @property
+    def active(self):
+        return time.time() < self.until
+
+    def start(self, sec):
+        self.until, self.pos, self.seen = time.time() + sec + 5, None, time.time()
+        print(f"[perception] follow: start ({sec:.0f}s)")
+
+    def stop(self):
+        if self.until:
+            print("[perception] follow: stop")
+        self.until, self.pos = 0.0, None
+
+    @staticmethod
+    def blobs(pts, top_ray):
+        """上から見た地図のかたまり: [{"x","d","w","person","cells":(x[], d[], 数[])}]"""
+        x, fwd, height = pts
+        sel = height > 0.2                                               # 床の小物・すねより下の段差は見ない
+        x, fwd, height = x[sel], fwd[sel], height[sel]
+        nx, nd = int(4.0 / FOLLOW_CELL), int(OBSTACLE_RANGE / FOLLOW_CELL)
+        ix, idd = ((x + 2.0) / FOLLOW_CELL).astype(int), (fwd / FOLLOW_CELL).astype(int)
+        ok = (ix >= 0) & (ix < nx) & (idd >= 0) & (idd < nd)
+        ix, idd, height = ix[ok], idd[ok], height[ok]
+        count = np.zeros((nd, nx), np.int32)
+        top = np.zeros((nd, nx), np.float32)
+        np.add.at(count, (idd, ix), 1)
+        np.maximum.at(top, (idd, ix), height)
+        occ = (count >= 2).astype(np.uint8)
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(cv2.dilate(occ, np.ones((3, 3), np.uint8)), connectivity=8)
+        out = []
+        for i in range(1, n):
+            cells = (labels == i) & (occ > 0)
+            cd, cx_ = np.nonzero(cells)
+            wgt = count[cd, cx_].astype(np.float32)
+            if wgt.sum() < 30:                                           # 小さすぎる(ノイズ・細い脚の物)
+                continue
+            bx = (float((cx_ * wgt).sum() / wgt.sum()) + 0.5) * FOLLOW_CELL - 2.0
+            bd = (float((cd * wgt).sum() / wgt.sum()) + 0.5) * FOLLOW_CELL
+            w = stats[i, cv2.CC_STAT_WIDTH] * FOLLOW_CELL
+            h_need = min(PERSON_TOP, CAMERA_HEIGHT + bd * top_ray - 0.15)   # 画角の上に出るなら、その手前まで届けば良い
+            person = (PERSON_WIDTH[0] <= w <= PERSON_WIDTH[1] and stats[i, cv2.CC_STAT_HEIGHT] * FOLLOW_CELL <= 0.9
+                      and float(top[cells].max()) >= h_need)
+            out.append({"x": bx, "d": bd, "w": w, "person": person,
+                        "cells": ((cx_ + 0.5) * FOLLOW_CELL - 2.0, (cd + 0.5) * FOLLOW_CELL, wgt)})
+        return out
+
+    def update(self, pts, top_ray, face):
+        """1フレームごとに呼ぶ。face は顔の (x, 前) [m] か None。送る JSON を返す"""
+        now = time.time()
+        blobs = self.blobs(pts, top_ray)
+        near = lambda b, p: math.hypot(b["x"] - p[0], b["d"] - p[1])
+        pick = None
+        if face:                                                         # 顔の真下のかたまり(人だと確かめられる)
+            cand = [b for b in blobs if near(b, face) < 0.5 and b["w"] <= 1.2]
+            fb = min(cand, key=lambda b: near(b, face), default=None)
+            if fb and (self.pos is None or near(fb, self.pos) < FOLLOW_GATE_LOST):
+                pick = fb
+        if pick is None and self.pos is None:                            # 始め: 正面いちばん近くの人くらいのかたまり
+            cand = [b for b in blobs if b["person"] and b["d"] <= FOLLOW_LOCK_DIST
+                    and abs(math.degrees(math.atan2(b["x"], b["d"]))) <= FOLLOW_LOCK_DEG]
+            pick = min(cand, key=lambda b: b["d"], default=None)
+        elif pick is None:                                               # 前の位置のすぐ近く(人らしい方を優先)
+            gate = FOLLOW_GATE if now - self.seen < 0.5 else FOLLOW_GATE_LOST
+            cand = [b for b in blobs if near(b, self.pos) <= gate]
+            pick = min(cand, key=lambda b: (not b["person"], near(b, self.pos)), default=None)
+        if pick is not None:
+            bx, bd = pick["x"], pick["d"]
+            if pick["w"] > PERSON_WIDTH[1] and self.pos is not None:    # 壁や物とくっついた: 前の位置のまわりだけで重心をとる
+                cx_, cd, wgt = pick["cells"]
+                m = np.hypot(cx_ - self.pos[0], cd - self.pos[1]) < 0.22   # 人の幅の半分くらい
+                if m.any():
+                    bx, bd = float((cx_[m] * wgt[m]).sum() / wgt[m].sum()), float((cd[m] * wgt[m]).sum() / wgt[m].sum())
+            if self.pos is None:
+                print(f"[perception] follow: locked x={bx:+.2f} d={bd:.2f}m ({'face' if face else 'body'})")
+                self.pos = (bx, bd)
+            else:
+                self.pos = (0.4 * self.pos[0] + 0.6 * bx, 0.4 * self.pos[1] + 0.6 * bd)
+            self.seen = now
+        lost = pick is None
+        out = {"lost": lost, "face": bool(face and pick is not None and near(pick, face) < 0.5),
+               "obstacle": detect_obstacles(pts, None if self.pos is None else self.pos)}
+        if not lost:
+            out["x"], out["d"] = round(self.pos[0], 2), round(self.pos[1], 2)
+        return out
 
 
 def detect_face(detector, view):
@@ -474,6 +595,22 @@ def detect_face(detector, view):
 
 
 face_id = FaceId()
+follow = FollowTracker()
+
+
+def on_follow(msg):
+    try:
+        m = json.loads(msg.data)
+        on, sec = bool(m.get("on", True)), min(600.0, float(m.get("sec", 300)))
+    except (ValueError, TypeError, AttributeError):
+        return
+    if on:
+        follow.start(sec)
+    else:
+        follow.stop()
+
+
+node.create_subscription(String, "/ritsu/follow", on_follow, 10)
 # /ritsu/enroll を受け取るため、カメラのループとは別のスレッドで ROS 2 のコールバックを回す
 def spin():
     try:
@@ -560,8 +697,18 @@ def main():
                                   to_sensor_uv(box[0] + box[2], box[1] + box[3], w, h))
             sbox = (min(u1, u2), min(v1, v2), abs(u2 - u1), abs(v2 - v1))
         hand = detect_hand_near(depth, scale, sbox, (fx, fy, cx, cy))
-        obstacle = detect_obstacles(depth, scale, (fx, fy, cx, cy))
+        pts = floor_points(depth, scale, (fx, fy, cx, cy))
+        obstacle = detect_obstacles(pts)
         publish_json(pub_obstacle, obstacle)
+        target = None
+        if follow.active:
+            fpos = None
+            if found:                                                    # 顔を床に水平な (x, 前) に直す
+                fpos = (found["x"], found["z"] * math.cos(CAMERA_PITCH) - found["y"] * math.sin(CAMERA_PITCH))
+            target = follow.update(pts, math.tan(math.atan2(cy, fy) - CAMERA_PITCH), fpos)
+            publish_json(pub_follow, target)
+        elif follow.until:
+            follow.stop()                                                # 時間切れ(台車のノードが止まっていても追い続けない)
         hand_streak = hand_streak + 1 if hand else 0
         if hand_streak >= 2:
             publish_point(pub_hand, hand["x"], hand["y"], hand["z"])
@@ -586,6 +733,9 @@ def main():
                      if found else "no person")
             state += (f", yaw={yaw:+.2f}{' looking' if looking.state else ''}" if yaw is not None else "")
             state += f", hand z={hand['z']:.2f}m" if hand else ""
+            if target:
+                state += (", follow lost" if target["lost"] else
+                          f", follow x={target['x']:+.2f} d={target['d']:.2f}m{' face' if target['face'] else ''}")
             state += ", obstacle " + " ".join(f"{k}={'-' if v is None else f'{v:.2f}'}" for k, v in obstacle.items())
             state += f", id={face_id.id or '-'}({face_id.score:.2f})" if face_id.db is not None and found else ""
             imu_state = (f", tilt roll={tilt.roll:+.0f} pitch={tilt.pitch:+.0f}" if imu and tilt.base

@@ -193,7 +193,8 @@
     <label><input type="radio" name="spd" value="0.2"> ふつう</label></div>
   <div class="speed"><label><input type="checkbox" id="turn-enable"> 人の方を向く</label>
     <button type="button" id="turn-now" class="hbtn">こっちを向いて</button>
-    <label><input type="checkbox" id="walk"> おさんぽ</label></div>
+    <label><input type="checkbox" id="walk"> おさんぽ</label>
+    <label><input type="checkbox" id="follow"> フォロー</label></div>
   <div id="drive-state">台車からの知らせを待っています…</div>
   <details><summary class="hint">1輪ずつ試す(配線・向きの確認)</summary>
     <div class="wheels"><button data-w="0">左前</button><button data-w="1">右前</button><button data-w="2">左後</button><button data-w="3">右後</button></div>
@@ -413,20 +414,29 @@
     stopDrive();
     ros.pub('/ritsu/move', 'std_msgs/String', { data: JSON.stringify({ action: 'stop' }) });
     ros.pub('/ritsu/walk', 'std_msgs/String', { data: JSON.stringify({ on: false }) });
+    ros.pub('/ritsu/follow', 'std_msgs/String', { data: JSON.stringify({ on: false }) });
   });
   // おさんぽ: 1分間、障害物をよけながら動き回る(十字ボタンを触る・「止まって」でもやめる)
   const walk = $('walk');
   walk.addEventListener('change', () =>
     ros.pub('/ritsu/walk', 'std_msgs/String', { data: JSON.stringify({ on: walk.checked, sec: 60 }) }));
+  // フォロー: 5分間、正面の人の方を向きながら1mあけてついていく(十字ボタンを触る・「止まって」でもやめる)
+  const follow = $('follow');
+  follow.addEventListener('change', () =>
+    ros.pub('/ritsu/follow', 'std_msgs/String', { data: JSON.stringify({ on: follow.checked, sec: 300 }) }));
+  const FOLLOW_STATE = { find: 'ついていく人を探している', forward: 'ついていっている', near: '近いので待っている',
+                         turn: '人の方へ向き直している', left: '左へよけている', right: '右へよけている',
+                         wait: '間がふさがっているので待っている', lost: '見失ったので待っている' };
   let baseAt = 0;
   ros.sub('/ritsu/base_status', 'std_msgs/String', m => {
     const st = parse(m.data);
     baseAt = Date.now();
     if (typeof st.turn_enable === 'boolean') turnEnable.checked = st.turn_enable;
     walk.checked = !!st.walk;
+    follow.checked = !!st.follow;
     $('drive-state').textContent = !st.ok ? `STM32 とつながりません(${st.error})`
       : st.fault && st.fault.length ? `${st.fault.join('・')}が回らないので止めました(引っかかり・配線を確認)`
-      : (st.test ? `${st.test}を試し回し中` : st.walk ? `おさんぽ中(${{ forward: '進んでいる', left: '左へ向きを変えている', right: '右へ向きを変えている' }[st.walk]})` : st.turn ? '人の方を向いています' : st.move ? `少し動いています(${{ forward: '前', back: '後ろ', left: '左', right: '右' }[st.move]})` : 'つながっています') +
+      : (st.test ? `${st.test}を試し回し中` : st.follow ? `フォロー中(${FOLLOW_STATE[st.follow] || st.follow}${st.follow_dist != null ? `・人まで ${st.follow_dist.toFixed(2)}m` : ''})` : st.walk ? `おさんぽ中(${{ forward: '進んでいる', left: '左へ向きを変えている', right: '右へ向きを変えている' }[st.walk]})` : st.turn ? '人の方を向いています' : st.move ? `少し動いています(${{ forward: '前', back: '後ろ', left: '左', right: '右' }[st.move]})` : 'つながっています') +
         `・車輪の速さ[m/s] ${['左前', '右前', '左後', '右後'].map((w, i) => `${w} ${st.speed[i].toFixed(2)}`).join(' ')}` +
         (st.obstacle ? `・障害物[m] ${['front', 'left', 'right'].map(k => `${{ front: '前', left: '左', right: '右' }[k]} ${st.obstacle[k] == null ? '-' : st.obstacle[k].toFixed(2)}`).join(' ')}` +
                        (st.blocked ? '(前に近いので進みません)' : '') : '・障害物: カメラから知らせなし') +

@@ -17,6 +17,7 @@
  *   発行 /ritsu/turn           std_msgs/String  JSON {"reason","sec"} 台車ごと相手の方を向いてと頼む (kioskのみ)
  *   発行 /ritsu/move           std_msgs/String  JSON {"action":"back/forward/left/right/stop"} 台車で少し動く (kioskのみ)
  *   発行 /ritsu/walk           std_msgs/String  JSON {"on","sec"} おさんぽモード (kioskのみ)
+ *   発行 /ritsu/follow         std_msgs/String  JSON {"on","sec"} フォローモード (kioskのみ)
  *   購読 /ritsu/base_event     std_msgs/String  JSON 台車からの知らせ(障害物で止まった・おさんぽが終わった など) (kioskのみ)
  *   発行 /ritsu/enroll         std_msgs/String  JSON {"action":"add"|"clear"} マスターの顔の登録 (RITSU.enroll())
  *   声: voice.js が /stt (Whisper) で聞き取り、/tts (VOICEVOX) で読み上げる(kiosk 画面のみ)。聞き取った言葉は
@@ -343,6 +344,8 @@
     onMove: action => { if (RITSU_CFG.kiosk) pubJson('/ritsu/move', { action }); },
     // おさんぽモード(台車がゆっくり進み、障害物があれば向きを変える。1分。kiosk のみ)
     onWalk: on => { if (RITSU_CFG.kiosk) pubJson('/ritsu/walk', { on, sec: 60 }); },
+    // フォローモード(台車が目の前の人の方を向きながら、1mあけてついていく。5分。kiosk のみ)
+    onFollow: on => { if (RITSU_CFG.kiosk) pubJson('/ritsu/follow', { on, sec: 300 }); },
     onQuery,
   });
   brain.ping();

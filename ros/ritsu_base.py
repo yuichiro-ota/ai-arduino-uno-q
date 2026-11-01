@@ -25,6 +25,12 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
   /ritsu/walk       std_msgs/String  JSON {"on":true, "sec":60}  おさんぽモード: ゆっくり前に進み、正面 WALK_CLEAR 以内に物が
                     見えたらその場で空いている方へ回って、空いたらまた進む(後ろは見えないので下がらない)。
                     sec 秒・「止まって」(/ritsu/move stop)・/cmd_vel(手の操作)・カメラの知らせが途切れたらやめる
+  /ritsu/follow     std_msgs/String  JSON {"on":true, "sec":300}  フォローモード: カメラのノードが追う人(/ritsu/follow_target)の方を
+                    向きながら、FOLLOW_DIST 離れてついていく(近ければ止まる。後ろは見えないので下がらない)。
+                    人との間に障害物があれば、Jev と同じ形の判断(follow_decide)で空いている側へ横に動いてよけ、両側とも
+                    塞がっていれば待つ。見失ったらその場で待ち、FOLLOW_LOST_SEC 見つからなければやめる。
+                    sec 秒・「止まって」・/cmd_vel(手の操作)・おさんぽを始める・カメラの知らせが途切れたらやめる
+  /ritsu/follow_target  std_msgs/String  JSON {"x","d","face","lost","obstacle"} ついていく人の位置(カメラのノードが出す)
   /ritsu/obstacle   std_msgs/String  JSON {"front","left","right"} 前方の障害物までの距離 [m](カメラのノードが出す)
                     front が OBSTACLE_STOP より近い間は、前に進む指令だけ止める(回る・下がるはできる。十字ボタンも同じ)
 発行トピック:
@@ -32,10 +38,16 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
   /ritsu/base_status  std_msgs/String  JSON {"ok":bool, "error":"...", "fault":[...], "enc_b":[...], "speed":[4輪 m/s], "cmd":[vx,vy,wz],
                                                 "turn":"向いている理由" or null, "turn_enable":bool, "move":"動いている向き" or null,
                                                 "obstacle":{"front","left","right"} or null, "blocked":bool,
-                                                "walk":"forward"|"left"|"right" or null(おさんぽ中の動き)}
+                                                "walk":"forward"|"left"|"right" or null(おさんぽ中の動き),
+                                                "follow":"find"|"forward"|"near"|"turn"|"left"|"right"|"wait"|"lost" or null,
+                                                "follow_dist": ついていく人までの距離 [m] or null}
   /ritsu/base_event   std_msgs/String  JSON {"type":"blocked","by":"move"|"manual"|"walk","dist":0.32,"free":"left"|"right"|null}
                       前に進もうとして障害物で止めたとき(画面の律が知らせる)。free は空いている側(両方なら広い方)
                       JSON {"type":"walk","state":"start"|"stop","why":"time"|"stop"|"manual"|"camera"|"off"} おさんぽの始まり・終わり
+                      JSON {"type":"follow","state":"start"|"stop","why":"time"|"stop"|"manual"|"camera"|"off"|"walk"|"nobody"|"lost"}
+                      フォローの始まり・終わり(nobody: ついていく人が見つからない / lost: 見失った)
+                      by が "follow" の blocked は、フォロー中に人との間が両側とも塞がって待っているとき
+発行(ほかに): /ritsu/follow {"on":false}  フォローをやめたとき(カメラのノードも追うのをやめる)
                     enc_b は向きを B相で読めている車輪(最初に少し回すと決まる)
 
 環境変数:
@@ -54,6 +66,8 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
   OBSTACLE_STOP   正面の障害物がこれより近いと前に進まない [m] (default 0.4)
   WALK_SPEED      おさんぽで前に進む速さ [m/s] (default 0.08)
   WALK_CLEAR      おさんぽで、正面の物がこれより近くなったら向きを変える [m] (default 0.7)
+  FOLLOW_DIST     フォローで人との間をこれだけあける [m] (default 1.0)
+  FOLLOW_SPEED    フォローで前に進む速さの上限 [m/s] (default 0.15)
 """
 import json
 import math
@@ -97,6 +111,18 @@ WALK_CLEAR = float(os.environ.get("WALK_CLEAR", "0.7"))
 WALK_TURN_SPEED = 0.5                # [rad/s] おさんぽで向きを変える速さ
 WALK_TURN_MAX_DEG = 200              # 回ってもこれだけで正面が空かなければやめる(囲まれている)
 WALK_SEC_MAX = 600
+FOLLOW_DIST = float(os.environ.get("FOLLOW_DIST", "1.0"))
+FOLLOW_SPEED = float(os.environ.get("FOLLOW_SPEED", "0.15"))
+FOLLOW_GAIN = 0.5                    # 人までの距離の余り [m] に掛けて前に進む速さにする
+FOLLOW_TURN_MAX = 0.6                # [rad/s] 人の方を向く速さの上限
+FOLLOW_TURN_DEG = 5                  # 人の向きのずれがこれ以内なら回らない
+FOLLOW_TURN_SLOW_DEG = 40            # ずれがこれ以上なら進まずに向くだけ(大きく横に動いた人を正面に戻してから進む)
+FOLLOW_CLEAR = 0.6                   # [m] 人との間の正面の物がこれより近ければよける
+FOLLOW_STRAFE = 0.08                 # [m/s] よけるときに横に動く速さ(メカナムなので向きを変えずに横へ)
+FOLLOW_STALE_SEC = 0.5               # これより古い人の位置は使わない
+FOLLOW_FIND_SEC = 3.0                # 始めてからこれだけ人が決まらなければやめる
+FOLLOW_LOST_SEC = 4.0                # 見失ってこれだけ見つからなければやめる
+FOLLOW_SEC_MAX = 600
 MOVE_ACTIONS = {"forward": (MOVE_SPEED, 0.0), "back": (-MOVE_SPEED, 0.0),
                 "left": (0.0, MOVE_TURN_SPEED), "right": (0.0, -MOVE_TURN_SPEED)}
 RATE_HZ = 20
@@ -152,11 +178,13 @@ def main():
     odom_pub = node.create_publisher(Odometry, "/odom", 10)
     status_pub = node.create_publisher(String, "/ritsu/base_status", 10)
     event_pub = node.create_publisher(String, "/ritsu/base_event", 10)
+    follow_pub = node.create_publisher(String, "/ritsu/follow", 10)
     router = Router(ROUTER_SOCK)
     st = {"cmd": (0.0, 0.0, 0.0), "cmd_at": 0.0, "test": None, "last": None, "x": 0.0, "y": 0.0, "th": 0.0,
           "speed": [0.0] * 4, "fault": 0, "enc_b": 0, "ok": False, "error": "", "n": 0, "t": time.monotonic(),
           "person": None, "turn": None, "turn_enable": TURN_ENABLE, "move": None,
-          "obstacle": None, "obstacle_at": 0.0, "blocked": False, "blocked_said": 0.0, "walk": None}
+          "obstacle": None, "obstacle_at": 0.0, "blocked": False, "blocked_said": 0.0, "walk": None,
+          "follow": None, "target": None}
 
     def on_cmd(msg):
         st["cmd"] = (clamp(msg.linear.x, MAX_LINEAR), clamp(msg.linear.y, MAX_LINEAR), clamp(msg.angular.z, MAX_ANGULAR))
@@ -165,6 +193,8 @@ def main():
         st["turn"] = st["move"] = None   # 手の操作を優先する
         if st["walk"]:
             stop_walk("manual")
+        if st["follow"]:
+            stop_follow("manual")
 
     def on_person(msg):
         if msg.point.z > 0:
@@ -178,8 +208,8 @@ def main():
         except (ValueError, TypeError, AttributeError):
             return
         p = st["person"]
-        if not st["turn_enable"] or st["test"] or time.monotonic() - st["cmd_at"] < 1.0:
-            return
+        if not st["turn_enable"] or st["test"] or st["follow"] or time.monotonic() - st["cmd_at"] < 1.0:
+            return                       # フォロー中はもう人の方を向いている
         seen = p and time.monotonic() - p[2] <= TURN_LOST_SEC
         if not seen and not search:
             return
@@ -202,6 +232,8 @@ def main():
             st["move"] = st["turn"] = None
             if st["walk"]:
                 stop_walk("stop")
+            if st["follow"]:
+                stop_follow("stop")
             node.get_logger().info("止まって と頼まれた")
             return
         if action not in MOVE_ACTIONS or st["test"] or time.monotonic() - st["cmd_at"] < 1.0:
@@ -235,9 +267,9 @@ def main():
         except (ValueError, TypeError, AttributeError, KeyError):
             pass
 
-    def free_side():
+    def free_side(o=None):
         """空いている側(4-link-robot の Jev の決め方と同じ: 空いている方、両方なら広い方)。どちらも塞がっていれば None"""
-        o = st["obstacle"] or {}
+        o = o or st["obstacle"] or {}
         far = {k: (o.get(k) if o.get(k) is not None else 9.0) for k in ("left", "right")}
         open_ = [k for k, v in far.items() if v >= OBSTACLE_FREE]
         return max(open_, key=lambda k: far[k]) if open_ else None
@@ -278,6 +310,8 @@ def main():
             node.get_logger().warn("おさんぽ: カメラから障害物の知らせが無いので始めない")
             event({"type": "walk", "state": "stop", "why": "camera"})
             return
+        if st["follow"]:
+            stop_follow("walk")
         st["walk"] = {"until": time.monotonic() + sec, "phase": "forward", "dir": 1.0, "th": 0.0}
         st["move"] = st["turn"] = None
         node.get_logger().info(f"おさんぽ: 始める({sec:.0f}秒)")
@@ -322,6 +356,113 @@ def main():
             stop_walk("blocked")
             return None
         return 0.0, WALK_TURN_SPEED * w["dir"]
+
+    def on_follow(msg):
+        try:
+            m = json.loads(msg.data)
+            on, sec = bool(m.get("on", True)), min(FOLLOW_SEC_MAX, float(m.get("sec", 300)))
+        except (ValueError, TypeError, AttributeError):
+            return
+        if not on:
+            if st["follow"]:
+                stop_follow("off")
+            return
+        if st["test"]:
+            return
+        if not obstacle_now():
+            node.get_logger().warn("フォロー: カメラから障害物の知らせが無いので始めない")
+            stop_follow("camera", force=True)
+            return
+        if st["walk"]:
+            stop_walk("follow")
+        now = time.monotonic()
+        st["follow"] = {"until": now + sec, "since": now, "seen": 0.0, "act": "find", "waiting": False}
+        st["target"] = None
+        st["move"] = st["turn"] = None
+        node.get_logger().info(f"フォロー: 始める({sec:.0f}秒)")
+        event({"type": "follow", "state": "start"})
+
+    def stop_follow(why, force=False):
+        if not st["follow"] and not force:
+            return
+        st["follow"] = st["target"] = None
+        follow_pub.publish(String(data=json.dumps({"on": False})))   # カメラのノードも追うのをやめる
+        node.get_logger().info(f"フォロー: やめる({why})")
+        event({"type": "follow", "state": "stop", "why": why})
+
+    def on_follow_target(msg):
+        try:
+            m = json.loads(msg.data)
+            o = m.get("obstacle") or {}
+            obs = {k: (float(o[k]) if o.get(k) is not None else None) for k in ("front", "left", "right")}
+            pos = None if m.get("lost") else (float(m["x"]), float(m["d"]))
+        except (ValueError, TypeError, AttributeError, KeyError):
+            return
+        st["target"] = {"pos": pos, "face": bool(m.get("face")), "obstacle": obs, "at": time.monotonic()}
+
+    def follow_decide(o, t):
+        """フォローの次の動き(4-link-robot の Jev と同じ形の判断: FORWARD / LEFT / RIGHT / WAIT)。
+        o は人を除いた障害物、t は人の (x, 前)。人との間の正面に物が無ければ FORWARD。あれば空いている側へ横に動き
+        (両方空いていれば人のいる側)、両方塞がっていれば WAIT。local-jev などに差し替えるときはここを置き換える"""
+        front = o["front"]
+        if front is None or front >= FOLLOW_CLEAR or front >= t[1] - 0.2:
+            return "FORWARD"             # 物が無い・人より向こうにある
+        far = {k: (o[k] if o[k] is not None else 9.0) for k in ("left", "right")}
+        open_ = [k for k in far if far[k] >= OBSTACLE_FREE]
+        if len(open_) == 2:
+            return "RIGHT" if t[0] > 0 else "LEFT"
+        return open_[0].upper() if open_ else "WAIT"
+
+    def follow_cmd():
+        """フォロー中の (vx, vy, wz)。やめたら None"""
+        f, t, now = st["follow"], st["target"], time.monotonic()
+        if not f:
+            return None
+        if now > f["until"]:
+            stop_follow("time")
+            return None
+        if not obstacle_now():
+            stop_follow("camera")        # 見えないまま進まない
+            return None
+        fresh = t and now - t["at"] <= FOLLOW_STALE_SEC
+        if not fresh or t["pos"] is None:
+            if not f["seen"]:
+                if now - f["since"] > FOLLOW_FIND_SEC:
+                    stop_follow("nobody")
+                    return None
+                f["act"] = "find"
+            elif now - f["seen"] > FOLLOW_LOST_SEC:
+                stop_follow("lost")
+                return None
+            else:
+                f["act"] = "lost"        # その場で待つ(人が戻ってくる・カメラが見つけ直す)
+            return 0.0, 0.0, 0.0
+        if not f["seen"]:
+            node.get_logger().info(f"フォロー: ついていく人 {t['pos'][1]:.2f}m 先")
+        f["seen"] = now
+        x, d = t["pos"]
+        dist, angle = math.hypot(x, d), math.atan2(x, d)   # 右にいるほど正
+        wz = 0.0
+        if abs(math.degrees(angle)) > FOLLOW_TURN_DEG:
+            wz = -math.copysign(min(FOLLOW_TURN_MAX, max(TURN_MIN, TURN_GAIN * abs(angle))), angle) * TURN_SIGN
+        vx = min(FOLLOW_SPEED, FOLLOW_GAIN * (dist - FOLLOW_DIST)) if dist > FOLLOW_DIST + 0.1 else 0.0
+        vx *= max(0.0, 1 - abs(math.degrees(angle)) / FOLLOW_TURN_SLOW_DEG)
+        act = (follow_decide(t["obstacle"], (x, d)) if vx > 0
+               else "NEAR" if dist <= FOLLOW_DIST + 0.1 else "TURN")   # 近いので待つ / 向きを合わせてから進む
+        vy = 0.0
+        if act in ("LEFT", "RIGHT"):
+            vx, vy = 0.0, FOLLOW_STRAFE * (1.0 if act == "LEFT" else -1.0)
+        elif act == "WAIT":
+            vx = 0.0
+        if act == "WAIT" and not f["waiting"] and now - st["blocked_said"] > 3.0:
+            st["blocked_said"] = now
+            event({"type": "blocked", "by": "follow", "dist": t["obstacle"]["front"], "free": None})
+        f["waiting"] = act == "WAIT"
+        if act.lower() != f["act"]:
+            node.get_logger().info(f"フォロー: {act} (人 {dist:.2f}m {math.degrees(angle):+.0f}度 "
+                                   f"間の正面 {t['obstacle']['front'] if t['obstacle']['front'] is not None else '-'}m)")
+            f["act"] = act.lower()
+        return vx, vy, wz
 
     def on_turn_enable(msg):
         st["turn_enable"] = bool(msg.data)
@@ -372,16 +513,19 @@ def main():
         if time.monotonic() - st["cmd_at"] > CMD_TIMEOUT_SEC:
             st["cmd"] = (0.0, 0.0, 0.0)
             move = move_cmd()
-            turn = turn_cmd() if move is None else None
-            walk = walk_cmd() if move is None and turn is None else None
+            follow = follow_cmd() if move is None else None
+            turn = turn_cmd() if move is None and follow is None else None
+            walk = walk_cmd() if move is None and follow is None and turn is None else None
             if move is not None:
                 st["cmd"] = (move[0], 0.0, move[1])
+            elif follow is not None:
+                st["cmd"] = follow
             elif turn is not None:
                 st["cmd"] = (0.0, 0.0, turn)
             elif walk is not None:
                 st["cmd"] = (walk[0], 0.0, walk[1])
         manual = time.monotonic() - st["cmd_at"] <= CMD_TIMEOUT_SEC
-        vx, vy, wz = guard_forward(*st["cmd"], "manual" if manual else "move" if st["move"] else "walk" if st["walk"] else "turn")
+        vx, vy, wz = guard_forward(*st["cmd"], "manual" if manual else "move" if st["move"] else "follow" if st["follow"] else "walk" if st["walk"] else "turn")
         if st["blocked"] and st["move"] and st["move"]["vx"] > 0:
             st["move"] = None            # 「前に来て」は止めて終わり(障害物の前で待ち続けない)
         v = (vx - vy - LXY * wz, vx + vy + LXY * wz, vx + vy - LXY * wz, vx - vy + LXY * wz)
@@ -449,6 +593,9 @@ def main():
             "blocked": st["blocked"],
             "walk": (None if not st["walk"] else "forward" if st["walk"]["phase"] == "forward"
                      else "left" if st["walk"]["dir"] > 0 else "right"),
+            "follow": st["follow"]["act"] if st["follow"] else None,
+            "follow_dist": (round(math.hypot(*st["target"]["pos"]), 2) if st["follow"] and st["target"] and st["target"]["pos"]
+                            and time.monotonic() - st["target"]["at"] <= FOLLOW_STALE_SEC else None),
         }, ensure_ascii=False)))
 
     node.create_subscription(Twist, "/cmd_vel", on_cmd, 10)
@@ -459,6 +606,8 @@ def main():
     node.create_subscription(String, "/ritsu/move", on_move, 10)
     node.create_subscription(String, "/ritsu/obstacle", on_obstacle, 10)
     node.create_subscription(String, "/ritsu/walk", on_walk, 10)
+    node.create_subscription(String, "/ritsu/follow", on_follow, 10)
+    node.create_subscription(String, "/ritsu/follow_target", on_follow_target, 10)
     node.create_timer(1.0 / RATE_HZ, tick)
     node.get_logger().info(f"台車: 車輪 直径{WHEEL_R * 2:.3f}m 向き{INVERT} 最大 {MAX_LINEAR}m/s {MAX_ANGULAR}rad/s "
                            f"ソケット {ROUTER_SOCK} 人の方を向く {'する' if TURN_ENABLE else 'しない'}(最大 {TURN_MAX}rad/s)")

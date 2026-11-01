@@ -334,13 +334,14 @@
   brain.startIdle();
 
   /* ===== 話す / 静かにする =====
-   * スピーカーの絵: 緑で音が出ている=話す / 灰色に×=静かにしている(残りの分も出す)。押すと切り替え */
+   * スピーカーの絵: 緑で音が出ている=話す / 灰色に×=黙る(残りの時間も出す。最後の1分は秒で)。押すと切り替え */
   const talkMode = document.getElementById('talk-mode');
   const talkModeText = document.getElementById('talk-mode-text');
   const updateTalkMode = () => {
     const quiet = brain.quiet;
+    const left = Math.ceil((brain.quietUntil - performance.now()) / 1000);
     talkMode.classList.toggle('quiet', quiet);
-    talkModeText.textContent = quiet ? `静か ${Math.ceil((brain.quietUntil - performance.now()) / 60000)}分` : '話す';
+    talkModeText.textContent = !quiet ? '話す' : `黙る（残り${left > 60 ? `${Math.ceil(left / 60)}分` : `${left}秒`}）`;
   };
   talkMode.addEventListener('click', () => {
     if (brain.quiet) brain.setQuiet(0);

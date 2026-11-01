@@ -40,6 +40,8 @@ const float STALL_SPEED = 40;        // これより遅い[パルス/秒]状態�
 const unsigned long STALL_MS = 1000; // これだけ続いたらロックとみなす
 const int B_LEARN = 200;             // B相の極性を決めるのに使うパルス数(回して数えた分)
 const float B_AGREE = 0.9;           // 回した向きとこれだけ合えば B相を信じる
+const unsigned long PULSE_MIN_US = 200;   // これより短い間隔のパルスはモーターのノイズとして数えない
+                                          // (全開でも約2600パルス/秒 = 約385µs おき)
 
 volatile long pulses[4];             // 累計(向き付き)
 volatile int8_t spin[4] = {1, 1, 1, 1};  // 今回している向き(止めても最後の向きで数える)
@@ -58,8 +60,12 @@ unsigned long stallSince[4];
 unsigned long lastLoop = 0;
 
 volatile bool driving[4];            // PWM を出している(このときだけ B相の向きを回した向きと比べる)
+volatile unsigned long lastPulseUs[4];
 
 void onPulse(int i) {
+  const unsigned long us = micros();
+  if (us - lastPulseUs[i] < PULSE_MIN_US) return;
+  lastPulseUs[i] = us;
   const int8_t b = digitalRead(PINS[i].encB) ? 1 : -1;
   if (driving[i]) { bTotal[i]++; if (b == spin[i] * (bPol[i] ? bPol[i] : 1)) bAgree[i]++; }
   pulses[i] += (bOk[i] && bPol[i]) ? b * bPol[i] : spin[i];

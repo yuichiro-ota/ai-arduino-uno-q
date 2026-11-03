@@ -29,11 +29,13 @@ ritsu_perception.py — 律の人検出 ROS 2 ノード (Orbbec Gemini 335)
                          add: カメラの正面に来た一番大きい顔を約4秒で数枚とり、特徴(128個の数値)を保存する
                          (顔の画像は保存しない)。何回か add すると、向きや明るさの違いに強くなる
   /ritsu/follow          std_msgs/String   JSON {"on":true,"sec":300} フォローモード: ついていく人を決めて追い始める / やめる
+  /odom                  nav_msgs/Odometry 台車の動き(台車のノード)。フォローで、台車が回った・進んだ分だけ前に見た人の位置をずらす
 
   フォローモードの人の追い方: 深度の点を上から見た地図(FOLLOW_CELL 角のマス)にして、つながった「かたまり」に分ける。
   始めは顔が見えていればその真下のかたまり、見えなければ正面いちばん近くの人くらいの大きさ(幅・高さ)のかたまりを
   「この人」と決め、あとは前のフレームの位置のすぐ近くのかたまりを追う(台車のカメラは低いので、近くに立つ人の顔は
-  画角の上に出る。追うのは胴体と足)。顔が見えたら、その真下のかたまりで確かめ直す
+  画角の上に出る。追うのは胴体と足)。顔が見えたら、その真下のかたまりで確かめ直す。
+  UNO Q では数 fps しか処理できないので、前に見た位置は台車の動き(/odom)で補正し、探す範囲は前に見つけてからの時間で広げる
 
 環境変数:
   CAMERA_ROTATE   0/90/180/270 — カメラを縦置きする場合の回転補正
@@ -63,6 +65,7 @@ import cv2
 import numpy as np
 import rclpy
 from geometry_msgs.msg import PointStamped, Vector3
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Bool, String
 
@@ -100,10 +103,12 @@ OBSTACLE_RANGE = 3.0        # [m] これより遠い物は見ない
 OBSTACLE_FLOOR = 0.06       # [m] 床からこれより低い点は床とみなす
 OBSTACLE_POINTS = 12        # 1つの方向でこれだけ点が無ければ「何も無い」(ノイズの点で止まらないように)
 FOLLOW_CELL = 0.05          # [m] フォローで上から見た地図の1マス
-FOLLOW_GATE = 0.45          # [m] 前のフレームの位置からこれ以内のかたまりを同じ人とみなす
-FOLLOW_GATE_LOST = 0.8      # [m] 少し見失ったあとは広げて探す
+FOLLOW_GATE = 0.45          # [m] 前に見た位置からこれ以内のかたまりを同じ人とみなす
+FOLLOW_PERSON_SPEED = 1.0   # [m/s] 前に見つけてから時間がたつほど、人が歩ける分だけ探す範囲を広げる
+FOLLOW_GATE_MAX = 1.2       # [m] 探す範囲の上限
+FOLLOW_RANGE = 4.5          # [m] フォローではこの先まで見る(障害物は OBSTACLE_RANGE まで)
 FOLLOW_LOCK_DEG = 30        # 始めるとき、正面からこの角度以内の人を選ぶ
-FOLLOW_LOCK_DIST = 2.5      # [m] 始めるとき、これより遠い人は選ばない
+FOLLOW_LOCK_DIST = 3.5      # [m] 始めるとき、これより遠い人は選ばない
 PERSON_WIDTH = (0.15, 0.9)  # [m] 人とみなすかたまりの幅(上から見た左右の広がり)
 PERSON_TOP = 0.9            # [m] 人とみなすには、床からこの高さまで(画角の上に出るならその手前まで)届いている
 FOLLOW_EXCLUDE = 0.4        # [m] ついていく人のまわりのこの範囲は、フォロー用の障害物から除く
@@ -523,7 +528,7 @@ def floor_points(depth, scale, intr):
     step = 4
     d = depth[::step, ::step].astype(np.float32) * scale / 1000.0
     vs, us = np.mgrid[0:d.shape[0], 0:d.shape[1]] * step
-    ok = (d > OBSTACLE_MIN) & (d < OBSTACLE_RANGE)
+    ok = (d > OBSTACLE_MIN) & (d < FOLLOW_RANGE)
     z, x, y = d[ok], (us[ok] - cx) / fx * d[ok], (vs[ok] - cy) / fy * d[ok]
     fwd = z * math.cos(floor.pitch) - y * math.sin(floor.pitch)          # 水平に直した前方向
     down = y * math.cos(floor.pitch) + z * math.sin(floor.pitch)         # 水平に直した下方向
@@ -536,6 +541,8 @@ def detect_obstacles(pts, exclude=None):
     """台車の前方の障害物までの距離 {"front","left","right"} [m](無ければ None)。pts は floor_points の値。
     exclude=(x, 前) ならそのまわり FOLLOW_EXCLUDE の点を除く(フォローでついていく人を障害物にしない)"""
     x, fwd, _ = pts
+    near = fwd < OBSTACLE_RANGE
+    x, fwd = x[near], fwd[near]
     if exclude:
         far = np.hypot(x - exclude[0], fwd - exclude[1]) > FOLLOW_EXCLUDE
         x, fwd = x[far], fwd[far]
@@ -556,13 +563,14 @@ class FollowTracker:
         self.until = 0.0         # この時刻まで追う(0 = 追っていない)
         self.pos = None          # ついていく人の (x, 前) [m]。None = まだ決まっていない
         self.seen = 0.0          # 最後に見つけた時刻
+        self.odom = None         # 前に位置を直したときの台車の (x, y, 向き)(odom 座標)
 
     @property
     def active(self):
         return time.time() < self.until
 
     def start(self, sec):
-        self.until, self.pos, self.seen = time.time() + sec + 5, None, time.time()
+        self.until, self.pos, self.seen, self.odom = time.time() + sec + 5, None, time.time(), None
         print(f"[perception] follow: start ({sec:.0f}s)")
 
     def stop(self):
@@ -576,7 +584,7 @@ class FollowTracker:
         x, fwd, height = pts
         sel = height > 0.2                                               # 床の小物・すねより下の段差は見ない
         x, fwd, height = x[sel], fwd[sel], height[sel]
-        nx, nd = int(4.0 / FOLLOW_CELL), int(OBSTACLE_RANGE / FOLLOW_CELL)
+        nx, nd = int(4.0 / FOLLOW_CELL), int(FOLLOW_RANGE / FOLLOW_CELL)
         ix, idd = ((x + 2.0) / FOLLOW_CELL).astype(int), (fwd / FOLLOW_CELL).astype(int)
         ok = (ix >= 0) & (ix < nx) & (idd >= 0) & (idd < nd)
         ix, idd, height = ix[ok], idd[ok], height[ok]
@@ -603,23 +611,39 @@ class FollowTracker:
                         "cells": ((cx_ + 0.5) * FOLLOW_CELL - 2.0, (cd + 0.5) * FOLLOW_CELL, wgt)})
         return out
 
-    def update(self, pts, top_ray, face):
-        """1フレームごとに呼ぶ。face は顔の (x, 前) [m] か None。送る JSON を返す"""
+    def follow_odom(self, pose):
+        """前に見た人の位置を、そのあと台車が動いた分だけずらす(人は止まっているとみなす)。pose は今の台車の (x, y, 向き)"""
+        if pose is None:
+            return
+        if self.pos is not None and self.odom is not None:
+            ox, oy, oth = self.odom
+            c, s = math.cos(oth), math.sin(oth)
+            df = c * (pose[0] - ox) + s * (pose[1] - oy)                 # 前の台車から見て 前へ進んだ量
+            dl = -s * (pose[0] - ox) + c * (pose[1] - oy)                # 左へ動いた量
+            dth = pose[2] - oth                                          # 左へ回った角度
+            f, l = self.pos[1] - df, -self.pos[0] - dl                   # 人の位置を (前, 左) で
+            c, s = math.cos(dth), math.sin(dth)
+            self.pos = (-(-s * f + c * l), c * f + s * l)
+        self.odom = pose
+
+    def update(self, pts, top_ray, face, pose=None):
+        """1フレームごとに呼ぶ。face は顔の (x, 前) [m] か None、pose は台車の odom。送る JSON を返す"""
         now = time.time()
+        self.follow_odom(pose)
+        gate = min(FOLLOW_GATE_MAX, FOLLOW_GATE + FOLLOW_PERSON_SPEED * max(0.0, now - self.seen - 0.3))
         blobs = self.blobs(pts, top_ray)
         near = lambda b, p: math.hypot(b["x"] - p[0], b["d"] - p[1])
         pick = None
         if face:                                                         # 顔の真下のかたまり(人だと確かめられる)
             cand = [b for b in blobs if near(b, face) < 0.5 and b["w"] <= 1.2]
             fb = min(cand, key=lambda b: near(b, face), default=None)
-            if fb and (self.pos is None or near(fb, self.pos) < FOLLOW_GATE_LOST):
+            if fb and (self.pos is None or near(fb, self.pos) < max(gate, 0.8)):
                 pick = fb
         if pick is None and self.pos is None:                            # 始め: 正面いちばん近くの人くらいのかたまり
             cand = [b for b in blobs if b["person"] and b["d"] <= FOLLOW_LOCK_DIST
                     and abs(math.degrees(math.atan2(b["x"], b["d"]))) <= FOLLOW_LOCK_DEG]
             pick = min(cand, key=lambda b: b["d"], default=None)
         elif pick is None:                                               # 前の位置のすぐ近く(人らしい方を優先)
-            gate = FOLLOW_GATE if now - self.seen < 0.5 else FOLLOW_GATE_LOST
             cand = [b for b in blobs if near(b, self.pos) <= gate]
             pick = min(cand, key=lambda b: (not b["person"], near(b, self.pos)), default=None)
         if pick is not None:
@@ -679,6 +703,16 @@ def on_follow(msg):
 
 
 node.create_subscription(String, "/ritsu/follow", on_follow, 10)
+odom_pose = None
+
+
+def on_odom(msg):
+    global odom_pose
+    q = msg.pose.pose.orientation
+    odom_pose = (msg.pose.pose.position.x, msg.pose.pose.position.y, 2 * math.atan2(q.z, q.w))
+
+
+node.create_subscription(Odometry, "/odom", on_odom, 10)
 # /ritsu/enroll を受け取るため、カメラのループとは別のスレッドで ROS 2 のコールバックを回す
 def spin():
     try:
@@ -757,7 +791,8 @@ def main():
                          "z": z}
 
         looking.update(found is not None and abs(yaw) < LOOK_YAW)
-        face_id.update(view, face_row, yaw if yaw is not None else 0.0)
+        if not follow.active:                                            # フォロー中は重い顔の見分けを休んで速くする
+            face_id.update(view, face_row, yaw if yaw is not None else 0.0)
 
         # 画面のすぐ前の手(顔の枠はセンサー座標に戻してから除く)
         sbox = None
@@ -776,7 +811,7 @@ def main():
             fpos = None
             if found:                                                    # 顔を床に水平な (x, 前) に直す
                 fpos = (found["x"], found["z"] * math.cos(floor.pitch) - found["y"] * math.sin(floor.pitch))
-            target = follow.update(pts, math.tan(math.atan2(cy, fy) - floor.pitch), fpos)
+            target = follow.update(pts, math.tan(math.atan2(cy, fy) - floor.pitch), fpos, odom_pose)
             publish_json(pub_follow, target)
         elif follow.until:
             follow.stop()                                                # 時間切れ(台車のノードが止まっていても追い続けない)

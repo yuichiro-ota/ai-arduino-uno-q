@@ -67,7 +67,7 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
   OBSTACLE_STOP   正面の障害物がこれより近いと前に進まない [m] (default 0.4)
   WALK_SPEED      おさんぽで前に進む速さ [m/s] (default 0.08)
   WALK_CLEAR      おさんぽで、正面の物がこれより近くなったら向きを変える [m] (default 0.7)
-  FOLLOW_DIST     フォローで人との間をこれだけあける [m] (default 1.0)
+  FOLLOW_DIST     フォローで人との間をこれだけあける [m] (default 0.7)
   FOLLOW_SPEED    フォローで前に進む速さの上限 [m/s] (default 0.15)
 """
 import json
@@ -114,14 +114,17 @@ WALK_CLEAR = float(os.environ.get("WALK_CLEAR", "0.7"))
 WALK_TURN_SPEED = 0.5                # [rad/s] おさんぽで向きを変える速さ
 WALK_TURN_MAX_DEG = 200              # 回ってもこれだけで正面が空かなければやめる(囲まれている)
 WALK_SEC_MAX = 600
-FOLLOW_DIST = float(os.environ.get("FOLLOW_DIST", "1.0"))
+FOLLOW_DIST = float(os.environ.get("FOLLOW_DIST", "0.7"))
 FOLLOW_SPEED = float(os.environ.get("FOLLOW_SPEED", "0.15"))
 FOLLOW_GAIN = 0.5                    # 人までの距離の余り [m] に掛けて前に進む速さにする
-FOLLOW_TURN_MAX = 0.6                # [rad/s] 人の方を向く速さの上限
-FOLLOW_TURN_DEG = 5                  # 人の向きのずれがこれ以内なら回らない
+FOLLOW_TURN_MAX = 0.45               # [rad/s] 人の方を向く速さの上限
+FOLLOW_TURN_DEG = 12                 # 人の向きのずれがこれ以内なら回らない(追う位置は少し揺れるので、細かく回り続けないように)
+FOLLOW_TURN_NEAR_DEG = 20            # 人のすぐ近くで待っているときは、これ以内なら回らない(近いと少し動いただけで角度が大きい)
 FOLLOW_TURN_SLOW_DEG = 40            # ずれがこれ以上なら進まずに向くだけ(大きく横に動いた人を正面に戻してから進む)
 FOLLOW_CLEAR = 0.6                   # [m] 人との間の正面の物がこれより近ければよける
 FOLLOW_STRAFE = 0.08                 # [m/s] よけるときに横に動く速さ(メカナムなので向きを変えずに横へ)
+FOLLOW_FREE = 0.5                    # [m] よけるとき、横の物がこれより遠ければ「空いている」(横に少しずれるだけなので、
+                                     # おさんぽの OBSTACLE_FREE より小さく。狭い部屋でもよけられるように)
 FOLLOW_STALE_SEC = 1.0               # これより古い人の位置は使わない
 FOLLOW_FIND_SEC = 5.0                # 始めてからこれだけ人が決まらなければやめる
 FOLLOW_LOST_SEC = 4.0                # 見失ってこれだけ見つからなければやめる
@@ -417,7 +420,7 @@ def main():
         if front is None or front >= FOLLOW_CLEAR or front >= t[1] - 0.2:
             return "FORWARD"             # 物が無い・人より向こうにある
         far = {k: (o[k] if o[k] is not None else 9.0) for k in ("left", "right")}
-        open_ = [k for k in far if far[k] >= OBSTACLE_FREE]
+        open_ = [k for k in far if far[k] >= FOLLOW_FREE]
         if len(open_) == 2:
             return "RIGHT" if t[0] > 0 else "LEFT"
         return open_[0].upper() if open_ else "WAIT"
@@ -454,7 +457,7 @@ def main():
         x, d = t["pos"]
         dist, angle = math.hypot(x, d), math.atan2(x, d)   # 右にいるほど正
         wz = 0.0
-        if abs(math.degrees(angle)) > FOLLOW_TURN_DEG:
+        if abs(math.degrees(angle)) > (FOLLOW_TURN_NEAR_DEG if dist <= FOLLOW_DIST + 0.1 else FOLLOW_TURN_DEG):
             wz = -math.copysign(min(FOLLOW_TURN_MAX, max(TURN_MIN, TURN_GAIN * abs(angle))), angle) * TURN_SIGN
         vx = min(FOLLOW_SPEED, FOLLOW_GAIN * (dist - FOLLOW_DIST)) if dist > FOLLOW_DIST + 0.1 else 0.0
         vx *= max(0.0, 1 - abs(math.degrees(angle)) / FOLLOW_TURN_SLOW_DEG)

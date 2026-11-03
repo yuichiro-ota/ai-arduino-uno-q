@@ -635,6 +635,7 @@ def main():
     last_status = 0.0
     miss = 0
     hits = 0
+    frames = 0       # 処理したフレーム数(ログに 1秒あたりの回数を出す。UNO Q が忙しいと下がる)
     faces = 0        # 顔は見つかった回数(深度が取れずに捨てた分も含む)
     no_depth = 0     # 顔はあったが深度が取れなかった回数
     looking = LookTracker()
@@ -659,6 +660,7 @@ def main():
             continue
         last_pub = now
 
+        frames += 1
         color, depth, scale = frames_to_np(cf, df)
         view = rotate_img(color, ROTATE)
         det = detect_face(detector, view)
@@ -740,11 +742,11 @@ def main():
             state += f", id={face_id.id or '-'}({face_id.score:.2f})" if face_id.db is not None and found else ""
             imu_state = (f", tilt roll={tilt.roll:+.0f} pitch={tilt.pitch:+.0f}" if imu and tilt.base
                          else (", imu waiting" if imu else ""))
-            print(f"[perception] {state} ({hits} hits, {faces} faces, {no_depth} no-depth / "
+            print(f"[perception] {state} ({frames / LOG_EVERY_SEC:.1f}fps, {hits} hits, {faces} faces, {no_depth} no-depth / "
                   f"{LOG_EVERY_SEC}s{imu_state})")
             if DEBUG_SNAPSHOT:
                 save_snapshot(view, box, found, depth, scale)
-            last_log, hits, faces, no_depth = now, 0, 0, 0
+            last_log, hits, faces, no_depth, frames = now, 0, 0, 0, 0
 
 
 if __name__ == "__main__":

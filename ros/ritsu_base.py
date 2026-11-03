@@ -24,7 +24,8 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
   /ritsu/person     geometry_msgs/PointStamped  顔の位置(光学座標系 x:右 z:前)
   /ritsu/walk       std_msgs/String  JSON {"on":true, "sec":60}  おさんぽモード: ゆっくり前に進み、正面 WALK_CLEAR 以内に物が
                     見えたらその場で空いている方へ回って、空いたらまた進む(後ろは見えないので下がらない)。
-                    sec 秒・「止まって」(/ritsu/move stop)・/cmd_vel(手の操作)・カメラの知らせが途切れたらやめる
+                    sec 秒・「止まって」(/ritsu/move stop)・/cmd_vel(手の操作)・カメラの知らせが CAMERA_LOST_SEC 途切れたらやめる
+                    (少しの途切れでは止まって待つ)
   /ritsu/follow     std_msgs/String  JSON {"on":true, "sec":300}  フォローモード: カメラのノードが追う人(/ritsu/follow_target)の方を
                     向きながら、FOLLOW_DIST 離れてついていく(近ければ止まる。後ろは見えないので下がらない)。
                     人との間に障害物があれば、Jev と同じ形の判断(follow_decide)で空いている側へ横に動いてよけ、両側とも
@@ -105,6 +106,8 @@ MOVE_SPEED = 0.1                     # [m/s] 前後に動く速さ
 MOVE_TURN_SPEED = 0.5                # [rad/s] 左右を向く速さ
 OBSTACLE_STOP = float(os.environ.get("OBSTACLE_STOP", "0.4"))
 OBSTACLE_STALE_SEC = 1.0             # これより古い障害物の知らせは使わない(カメラが止まっている)
+CAMERA_LOST_SEC = 5.0                # おさんぽ・フォローは、知らせがこれだけ続けて途切れたらやめる(それまでは止まって待つ。
+                                     # UNO Q が忙しいとカメラのノードが一瞬遅れるので、少しの途切れではやめない)
 OBSTACLE_FREE = 0.8                  # [m] 左右の物がこれより遠ければ「空いている」
 WALK_SPEED = float(os.environ.get("WALK_SPEED", "0.08"))
 WALK_CLEAR = float(os.environ.get("WALK_CLEAR", "0.7"))
@@ -119,7 +122,7 @@ FOLLOW_TURN_DEG = 5                  # 人の向きのずれがこれ以内な�
 FOLLOW_TURN_SLOW_DEG = 40            # ずれがこれ以上なら進まずに向くだけ(大きく横に動いた人を正面に戻してから進む)
 FOLLOW_CLEAR = 0.6                   # [m] 人との間の正面の物がこれより近ければよける
 FOLLOW_STRAFE = 0.08                 # [m/s] よけるときに横に動く速さ(メカナムなので向きを変えずに横へ)
-FOLLOW_STALE_SEC = 0.5               # これより古い人の位置は使わない
+FOLLOW_STALE_SEC = 1.0               # これより古い人の位置は使わない
 FOLLOW_FIND_SEC = 3.0                # 始めてからこれだけ人が決まらなければやめる
 FOLLOW_LOST_SEC = 4.0                # 見失ってこれだけ見つからなければやめる
 FOLLOW_SEC_MAX = 600
@@ -287,6 +290,10 @@ def main():
         st["blocked"] = blocked
         return (0.0 if blocked else vx), vy, wz
 
+    def camera_gone():
+        """おさんぽ・フォローを続けられないほど、カメラの知らせが来ていない"""
+        return time.monotonic() - st["obstacle_at"] > CAMERA_LOST_SEC
+
     def obstacle_now():
         o = st["obstacle"]
         return o if o and time.monotonic() - st["obstacle_at"] < OBSTACLE_STALE_SEC else None
@@ -306,7 +313,7 @@ def main():
             return
         if st["test"]:
             return
-        if not obstacle_now():
+        if camera_gone():
             node.get_logger().warn("おさんぽ: カメラから障害物の知らせが無いので始めない")
             event({"type": "walk", "state": "stop", "why": "camera"})
             return
@@ -339,9 +346,11 @@ def main():
         if time.monotonic() > w["until"]:
             stop_walk("time")
             return None
-        if not o:
-            stop_walk("camera")          # 見えないまま進まない
+        if camera_gone():
+            stop_walk("camera")
             return None
+        if not o:
+            return 0.0, 0.0              # 知らせが少し途切れた: 見えないまま進まず、止まって待つ
         if w["phase"] == "forward":
             act = walk_decide(o)
             if act == "FORWARD":
@@ -369,7 +378,7 @@ def main():
             return
         if st["test"]:
             return
-        if not obstacle_now():
+        if camera_gone():
             node.get_logger().warn("フォロー: カメラから障害物の知らせが無いので始めない")
             stop_follow("camera", force=True)
             return
@@ -421,9 +430,11 @@ def main():
         if now > f["until"]:
             stop_follow("time")
             return None
-        if not obstacle_now():
-            stop_follow("camera")        # 見えないまま進まない
+        if camera_gone():
+            stop_follow("camera")
             return None
+        if not obstacle_now():
+            return 0.0, 0.0, 0.0         # 知らせが少し途切れた: 見えないまま進まず、止まって待つ
         fresh = t and now - t["at"] <= FOLLOW_STALE_SEC
         if not fresh or t["pos"] is None:
             if not f["seen"]:

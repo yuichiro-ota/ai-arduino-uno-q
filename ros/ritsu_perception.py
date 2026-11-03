@@ -566,6 +566,7 @@ class FollowTracker:
         self.pos = None          # ついていく人の (x, 前) [m]。None = まだ決まっていない
         self.seen = 0.0          # 最後に見つけた時刻
         self.odom = None         # 前に位置を直したときの台車の (x, y, 向き)(odom 座標)
+        self.said = 0.0          # 人を決められない理由をログに出した時刻
 
     @property
     def active(self):
@@ -609,7 +610,8 @@ class FollowTracker:
             h_need = min(PERSON_TOP, floor.height + bd * top_ray - 0.15)   # 画角の上に出るなら、その手前まで届けば良い
             person = (PERSON_WIDTH[0] <= w <= PERSON_WIDTH[1] and stats[i, cv2.CC_STAT_HEIGHT] * FOLLOW_CELL <= 0.9
                       and float(top[cells].max()) >= h_need)
-            out.append({"x": bx, "d": bd, "w": w, "person": person,
+            out.append({"x": bx, "d": bd, "w": w, "person": person, "depth": stats[i, cv2.CC_STAT_HEIGHT] * FOLLOW_CELL,
+                        "top": float(top[cells].max()), "need": h_need,
                         "cells": ((cx_ + 0.5) * FOLLOW_CELL - 2.0, (cd + 0.5) * FOLLOW_CELL, wgt)})
         return out
 
@@ -645,6 +647,14 @@ class FollowTracker:
             cand = [b for b in blobs if b["person"] and b["d"] <= FOLLOW_LOCK_DIST
                     and abs(math.degrees(math.atan2(b["x"], b["d"]))) <= FOLLOW_LOCK_DEG]
             pick = min(cand, key=lambda b: b["d"], default=None)
+            if pick is None and now - self.said > 2.0:                   # 決められない理由(正面に見えているかたまり)
+                self.said = now
+                front = sorted((b for b in blobs if abs(math.degrees(math.atan2(b["x"], b["d"]))) <= 45),
+                               key=lambda b: b["d"])[:4]
+                print("[perception] follow: no person yet — " + ("; ".join(
+                    f"x={b['x']:+.2f} d={b['d']:.2f} w={b['w']:.2f}/{PERSON_WIDTH[0]}-{PERSON_WIDTH[1]} "
+                    f"depth={b['depth']:.2f}/0.9 top={b['top']:.2f}/{b['need']:.2f}" for b in front) or "nothing in front")
+                    + (f"; face d={face[1]:.2f}" if face else ""), flush=True)
         elif pick is None:                                               # 前の位置のすぐ近く(人らしい方を優先)
             cand = [b for b in blobs if near(b, self.pos) <= gate]
             pick = min(cand, key=lambda b: (not b["person"], near(b, self.pos)), default=None)

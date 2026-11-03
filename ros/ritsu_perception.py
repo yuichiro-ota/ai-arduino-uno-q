@@ -43,8 +43,11 @@ ritsu_perception.py — 律の人検出 ROS 2 ノード (Orbbec Gemini 335)
   TOUCH_DIST      これより近い物を「画面のすぐ前の手」とみなす [m] (default 0.45)
   MASTER_MATCH    登録した顔とみなす類似度の下限 (default 0.40。SFace の推奨は 0.363、上げるほど厳しい)
   FACE_DB         登録した顔の特徴を保存するファイル (default /data/faces/master.npy)
+  FLOOR_AUTO        1: 床を深度から見つけて、カメラの高さと下向きの角度を自動で求める (default 1)。
+                    床が見えないうちは下の2つを使う
   CAMERA_HEIGHT     床からカメラまでの高さ [m] (default 1.0。障害物と床を分けるのに使う)
   CAMERA_PITCH_DEG  カメラの下向きの角度 [度] (default 0。下に向けているほど大きく)
+  FACE_DETECT_SCALE 顔検出に使う画像の縮小率 (default 0.5。小さいほど速いが、遠くの小さい顔を見落としやすい)
   ROBOT_HALF_WIDTH  台車の幅の半分+余裕 [m] (default 0.2。これより内側の物が「正面」の障害物)
   OBSTACLE_MIN      これより近い深度は使わない [m] (default 0.15。カメラに映る台車自身などを除く)
   DEBUG_SNAPSHOT  1 にすると5秒ごとにカメラ画像(検出枠つき)を debug/camera.jpg に保存する
@@ -87,6 +90,10 @@ FACE_DB_MAX = 60            # 保存する特徴の上限(古いものから捨�
 DEBUG_SNAPSHOT = os.environ.get("DEBUG_SNAPSHOT", "0") == "1"
 CAMERA_HEIGHT = float(os.environ.get("CAMERA_HEIGHT", "1.0"))
 CAMERA_PITCH = math.radians(float(os.environ.get("CAMERA_PITCH_DEG", "0")))
+FLOOR_AUTO = os.environ.get("FLOOR_AUTO", "1") != "0"
+FLOOR_EVERY_SEC = 2.0       # 床を見つけ直す間隔
+FLOOR_TOL = 0.03            # [m] 床の面からこれ以内の点を床とみなす
+FACE_DETECT_SCALE = float(os.environ.get("FACE_DETECT_SCALE", "0.5"))
 ROBOT_HALF_WIDTH = float(os.environ.get("ROBOT_HALF_WIDTH", "0.2"))
 OBSTACLE_MIN = float(os.environ.get("OBSTACLE_MIN", "0.15"))
 OBSTACLE_RANGE = 3.0        # [m] これより遠い物は見ない
@@ -453,6 +460,62 @@ def detect_hand_near(depth, scale, face_box, intr):
     return {"x": (u - cx) / fx * z, "y": (v - cy) / fy * z, "z": z}
 
 
+class Floor:
+    """床の面からカメラの高さと下向きの角度を求める(FLOOR_AUTO)。画像の下半分の深度の点に RANSAC で面を当て、
+    ほぼ水平(カメラの上下から45度以内)でいちばん多くの点が乗る面を床とする。値はなめらかに更新する"""
+
+    def __init__(self):
+        self.height, self.pitch = CAMERA_HEIGHT, CAMERA_PITCH
+        self.auto = False        # 床から求めた値か(False = 環境変数の値)
+        self.at = 0.0
+        self.rng = np.random.default_rng(0)
+
+    def update(self, depth, scale, intr):
+        now = time.time()
+        if not FLOOR_AUTO or now - self.at < FLOOR_EVERY_SEC:
+            return
+        self.at = now
+        fx, fy, cx, cy = intr
+        step = 8
+        d = depth[::step, ::step].astype(np.float32) * scale / 1000.0
+        vs, us = np.mgrid[0:d.shape[0], 0:d.shape[1]] * step
+        ok = (d > 0.3) & (d < 4.0) & (vs > d.shape[0] * step / 2)          # 下半分
+        if ok.sum() < 80:
+            return
+        z = d[ok]
+        p = np.stack([(us[ok] - cx) / fx * z, (vs[ok] - cy) / fy * z, z], axis=1)
+        best, best_n = 0, None
+        for _ in range(60):
+            a, b, c = p[self.rng.choice(len(p), 3, replace=False)]
+            n = np.cross(b - a, c - a)
+            norm = np.linalg.norm(n)
+            if norm < 1e-6:
+                continue
+            n = n / norm
+            if n[1] > 0:
+                n = -n                                                   # 上向き(カメラの -y 側)にそろえる
+            if -n[1] < math.cos(math.radians(45)):
+                continue                                                 # 水平な面ではない(壁など)
+            cnt = int((np.abs(p @ n + (-a @ n)) < FLOOR_TOL).sum())
+            if cnt > best:
+                best, best_n = cnt, (n, -a @ n)
+        if best_n is None or best < max(80, 0.3 * len(p)):
+            return
+        n, h = best_n
+        if not 0.1 < h < 2.0:
+            return
+        pitch = math.atan2(-n[2], -n[1])
+        if self.auto:
+            self.height += 0.3 * (h - self.height)
+            self.pitch += 0.3 * (pitch - self.pitch)
+        else:
+            self.height, self.pitch, self.auto = float(h), float(pitch), True
+            print(f"[perception] floor: camera height={h:.2f}m pitch={math.degrees(pitch):+.0f}deg (auto)")
+
+
+floor = Floor()
+
+
 def floor_points(depth, scale, intr):
     """深度の点をカメラの下向きの角度で水平に直し、床(OBSTACLE_FLOOR より低い)を除いた (x 右, 前, 床からの高さ) [m]。
     1/4 に間引いて軽くする"""
@@ -462,9 +525,9 @@ def floor_points(depth, scale, intr):
     vs, us = np.mgrid[0:d.shape[0], 0:d.shape[1]] * step
     ok = (d > OBSTACLE_MIN) & (d < OBSTACLE_RANGE)
     z, x, y = d[ok], (us[ok] - cx) / fx * d[ok], (vs[ok] - cy) / fy * d[ok]
-    fwd = z * math.cos(CAMERA_PITCH) - y * math.sin(CAMERA_PITCH)        # 水平に直した前方向
-    down = y * math.cos(CAMERA_PITCH) + z * math.sin(CAMERA_PITCH)       # 水平に直した下方向
-    height = CAMERA_HEIGHT - down
+    fwd = z * math.cos(floor.pitch) - y * math.sin(floor.pitch)          # 水平に直した前方向
+    down = y * math.cos(floor.pitch) + z * math.sin(floor.pitch)         # 水平に直した下方向
+    height = floor.height - down
     keep = (height > OBSTACLE_FLOOR) & (fwd > 0)
     return x[keep], fwd[keep], height[keep]
 
@@ -533,7 +596,7 @@ class FollowTracker:
             bx = (float((cx_ * wgt).sum() / wgt.sum()) + 0.5) * FOLLOW_CELL - 2.0
             bd = (float((cd * wgt).sum() / wgt.sum()) + 0.5) * FOLLOW_CELL
             w = stats[i, cv2.CC_STAT_WIDTH] * FOLLOW_CELL
-            h_need = min(PERSON_TOP, CAMERA_HEIGHT + bd * top_ray - 0.15)   # 画角の上に出るなら、その手前まで届けば良い
+            h_need = min(PERSON_TOP, floor.height + bd * top_ray - 0.15)   # 画角の上に出るなら、その手前まで届けば良い
             person = (PERSON_WIDTH[0] <= w <= PERSON_WIDTH[1] and stats[i, cv2.CC_STAT_HEIGHT] * FOLLOW_CELL <= 0.9
                       and float(top[cells].max()) >= h_need)
             out.append({"x": bx, "d": bd, "w": w, "person": person,
@@ -582,11 +645,16 @@ class FollowTracker:
 
 def detect_face(detector, view):
     """最も大きい(=近い)顔を返す: ((x, y, w, h), (目の中点 u, v), score, 顔の向き, YuNet の1行)。無ければ None"""
-    vh, vw = view.shape[:2]
+    small = view if FACE_DETECT_SCALE >= 1 else cv2.resize(view, None, fx=FACE_DETECT_SCALE, fy=FACE_DETECT_SCALE,
+                                                           interpolation=cv2.INTER_AREA)   # 縮めて速く探す
+    vh, vw = small.shape[:2]
     detector.setInputSize((vw, vh))
-    _, faces = detector.detect(cv2.cvtColor(view, cv2.COLOR_RGB2BGR))
+    _, faces = detector.detect(cv2.cvtColor(small, cv2.COLOR_RGB2BGR))
     if faces is None or not len(faces):
         return None
+    if small is not view:
+        faces = faces.copy()
+        faces[:, :14] /= FACE_DETECT_SCALE                               # 元の大きさの座標に戻す(枠と目・鼻・口)
     f = max(faces, key=lambda r: r[2] * r[3])
     x, y, w, h = (int(v) for v in f[:4])
     eye_u = int((f[4] + f[6]) / 2)   # 右目(4,5)と左目(6,7)の中点
@@ -699,6 +767,7 @@ def main():
                                   to_sensor_uv(box[0] + box[2], box[1] + box[3], w, h))
             sbox = (min(u1, u2), min(v1, v2), abs(u2 - u1), abs(v2 - v1))
         hand = detect_hand_near(depth, scale, sbox, (fx, fy, cx, cy))
+        floor.update(depth, scale, (fx, fy, cx, cy))
         pts = floor_points(depth, scale, (fx, fy, cx, cy))
         obstacle = detect_obstacles(pts)
         publish_json(pub_obstacle, obstacle)
@@ -706,8 +775,8 @@ def main():
         if follow.active:
             fpos = None
             if found:                                                    # 顔を床に水平な (x, 前) に直す
-                fpos = (found["x"], found["z"] * math.cos(CAMERA_PITCH) - found["y"] * math.sin(CAMERA_PITCH))
-            target = follow.update(pts, math.tan(math.atan2(cy, fy) - CAMERA_PITCH), fpos)
+                fpos = (found["x"], found["z"] * math.cos(floor.pitch) - found["y"] * math.sin(floor.pitch))
+            target = follow.update(pts, math.tan(math.atan2(cy, fy) - floor.pitch), fpos)
             publish_json(pub_follow, target)
         elif follow.until:
             follow.stop()                                                # 時間切れ(台車のノードが止まっていても追い続けない)
@@ -738,6 +807,7 @@ def main():
             if target:
                 state += (", follow lost" if target["lost"] else
                           f", follow x={target['x']:+.2f} d={target['d']:.2f}m{' face' if target['face'] else ''}")
+            state += f", floor h={floor.height:.2f}m pitch={math.degrees(floor.pitch):+.0f}{'(auto)' if floor.auto else '(env)'}"
             state += ", obstacle " + " ".join(f"{k}={'-' if v is None else f'{v:.2f}'}" for k, v in obstacle.items())
             state += f", id={face_id.id or '-'}({face_id.score:.2f})" if face_id.db is not None and found else ""
             imu_state = (f", tilt roll={tilt.roll:+.0f} pitch={tilt.pitch:+.0f}" if imu and tilt.base

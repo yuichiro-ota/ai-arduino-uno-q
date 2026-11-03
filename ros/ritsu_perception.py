@@ -99,6 +99,8 @@ CAMERA_PITCH = math.radians(float(os.environ.get("CAMERA_PITCH_DEG", "0")))
 FLOOR_AUTO = os.environ.get("FLOOR_AUTO", "1") != "0"
 FLOOR_EVERY_SEC = 2.0       # 床を見つけ直す間隔
 FLOOR_TOL = 0.03            # [m] 床の面からこれ以内の点を床とみなす
+FLOOR_JUMP_M, FLOOR_JUMP_DEG = 0.08, 4   # 今の値とこれ以上違う床は、すぐには使わない
+FLOOR_SWITCH = 5            # 違う値が続けてこの回数(約10秒)出たら、そちらへ移る
 FACE_DETECT_SCALE = float(os.environ.get("FACE_DETECT_SCALE", "0.5"))
 ROBOT_HALF_WIDTH = float(os.environ.get("ROBOT_HALF_WIDTH", "0.2"))
 OBSTACLE_MIN = float(os.environ.get("OBSTACLE_MIN", "0.15"))
@@ -478,6 +480,7 @@ class Floor:
     def __init__(self):
         self.height, self.pitch = CAMERA_HEIGHT, CAMERA_PITCH
         self.auto = False        # 床から求めた値か(False = 環境変数の値)
+        self.odd = []            # 今の値と大きく違った最近の (高さ, 角度)
         self.at = 0.0
         self.rng = np.random.default_rng(0)
 
@@ -517,6 +520,17 @@ class Floor:
             return
         pitch = math.atan2(-n[2], -n[1])
         if self.auto:
+            # カメラは台車に付いていて動かないので、急に大きく違う値は人の足や家具を床と間違えたもの。
+            # 続けて FLOOR_SWITCH 回同じくらいの値が出たときだけ(付け直した・最初が間違っていた)そちらへ移る
+            if abs(h - self.height) > FLOOR_JUMP_M or abs(pitch - self.pitch) > math.radians(FLOOR_JUMP_DEG):
+                self.odd = [o for o in self.odd if abs(o[0] - h) < FLOOR_JUMP_M
+                            and abs(o[1] - pitch) < math.radians(FLOOR_JUMP_DEG)] + [(h, pitch)]
+                if len(self.odd) < FLOOR_SWITCH:
+                    return
+                h, pitch = float(np.mean([o[0] for o in self.odd])), float(np.mean([o[1] for o in self.odd]))
+                self.height, self.pitch = h, pitch
+                print(f"[perception] floor: changed height={h:.2f}m pitch={math.degrees(pitch):+.0f}deg")
+            self.odd = []
             self.height += 0.3 * (h - self.height)
             self.pitch += 0.3 * (pitch - self.pitch)
         else:
@@ -572,6 +586,15 @@ class FollowTracker:
         self.odom = None         # 前に位置を直したときの台車の (x, y, 向き)(odom 座標)
         self.said = 0.0          # 人を決められない理由をログに出した時刻
         self.confirmed = 0.0     # 顔か人の形(かたまり)で最後に人だと確かめた時刻
+        self.request = None      # /ritsu/follow で頼まれた ("start", 秒) / ("stop", 0)。カメラの処理の中で apply する
+
+    def apply(self):
+        """頼まれた始め・終わりを反映する(カメラの処理のスレッドから呼ぶ)"""
+        req, self.request = self.request, None
+        if req and req[0] == "start":
+            self.start(req[1])
+        elif req:
+            self.stop()
 
     @property
     def active(self):
@@ -746,10 +769,7 @@ def on_follow(msg):
         on, sec = bool(m.get("on", True)), min(600.0, float(m.get("sec", 300)))
     except (ValueError, TypeError, AttributeError):
         return
-    if on:
-        follow.start(sec)
-    else:
-        follow.stop()
+    follow.request = ("start", sec) if on else ("stop", 0)   # ROS 2 のスレッドからは頼むだけ(追う計算の途中で消さない)
 
 
 node.create_subscription(String, "/ritsu/follow", on_follow, 10)
@@ -809,115 +829,120 @@ def main():
     hand_streak = 0  # 画面のすぐ前に物がある連続フレーム数(1フレームだけのノイズは無視)
     hand = None
     yaw = None
-    while True:
-        loop_alive = time.time()
-        fs = pipeline.wait_for_frames(200)
-        cf = fs.get_color_frame() if fs else None
-        df = fs.get_depth_frame() if fs else None
-        if cf is None or df is None:
-            if time.time() - last_frame > NO_FRAME_RESTART_SEC:
-                if imu:
-                    imu.stop()
-                pipeline.stop()
-                raise RuntimeError(f"no frames from camera for {NO_FRAME_RESTART_SEC}s")
-            continue
-        last_frame = time.time()
+    try:
+        while True:
+            loop_alive = time.time()
+            fs = pipeline.wait_for_frames(200)
+            cf = fs.get_color_frame() if fs else None
+            df = fs.get_depth_frame() if fs else None
+            if cf is None or df is None:
+                if time.time() - last_frame > NO_FRAME_RESTART_SEC:
+                    raise RuntimeError(f"no frames from camera for {NO_FRAME_RESTART_SEC}s")
+                continue
+            last_frame = time.time()
 
-        now = time.time()
-        if now - last_pub < 1.0 / FPS:
-            continue
-        last_pub = now
+            now = time.time()
+            if now - last_pub < 1.0 / FPS:
+                continue
+            last_pub = now
 
-        frames += 1
-        color, depth, scale = frames_to_np(cf, df)
-        view = rotate_img(color, ROTATE)
-        det = detect_face(detector, view)
+            frames += 1
+            color, depth, scale = frames_to_np(cf, df)
+            view = rotate_img(color, ROTATE)
+            det = detect_face(detector, view)
 
-        found = None
-        box = None
-        yaw = None
-        face_row = None
-        if det:
-            faces += 1
-            box, (eye_u, eye_v), score, yaw, face_row = det
-            h, w = color.shape[:2]
-            u, v = to_sensor_uv(eye_u, eye_v, w, h)
-            u = int(np.clip(u, 2, w - 3))
-            v = int(np.clip(v, 2, h - 3))
+            found = None
+            box = None
+            yaw = None
+            face_row = None
+            if det:
+                faces += 1
+                box, (eye_u, eye_v), score, yaw, face_row = det
+                h, w = color.shape[:2]
+                u, v = to_sensor_uv(eye_u, eye_v, w, h)
+                u = int(np.clip(u, 2, w - 3))
+                v = int(np.clip(v, 2, h - 3))
 
-            # 顔中心周辺 5x5 の深度中央値 [mm] → [m]
-            patch = depth[v - 2:v + 3, u - 2:u + 3].astype(np.float32) * scale
-            valid = patch[(patch > 200) & (patch < 6000)]
-            if not valid.size:
-                no_depth += 1
+                # 顔中心周辺 5x5 の深度中央値 [mm] → [m]
+                patch = depth[v - 2:v + 3, u - 2:u + 3].astype(np.float32) * scale
+                valid = patch[(patch > 200) & (patch < 6000)]
+                if not valid.size:
+                    no_depth += 1
+                else:
+                    z = float(np.median(valid)) / 1000.0
+                    found = {"x": (u - cx) / fx * z,
+                             "y": (v - cy) / fy * z,     # 光学座標系なので y は下が+
+                             "z": z}
+
+            looking.update(found is not None and abs(yaw) < LOOK_YAW)
+            if not follow.active:                                            # フォロー中は重い顔の見分けを休んで速くする
+                face_id.update(view, face_row, yaw if yaw is not None else 0.0)
+
+            # 画面のすぐ前の手(顔の枠はセンサー座標に戻してから除く)
+            sbox = None
+            if box:
+                h, w = color.shape[:2]
+                (u1, v1), (u2, v2) = (to_sensor_uv(box[0], box[1], w, h),
+                                      to_sensor_uv(box[0] + box[2], box[1] + box[3], w, h))
+                sbox = (min(u1, u2), min(v1, v2), abs(u2 - u1), abs(v2 - v1))
+            hand = detect_hand_near(depth, scale, sbox, (fx, fy, cx, cy))
+            floor.update(depth, scale, (fx, fy, cx, cy))
+            pts = floor_points(depth, scale, (fx, fy, cx, cy))
+            obstacle = detect_obstacles(pts)
+            publish_json(pub_obstacle, obstacle)
+            target = None
+            follow.apply()
+            if follow.active:
+                fpos = None
+                if found:                                                    # 顔を床に水平な (x, 前) に直す
+                    fpos = (found["x"], found["z"] * math.cos(floor.pitch) - found["y"] * math.sin(floor.pitch))
+                target = follow.update(pts, math.tan(math.atan2(cy, fy) - floor.pitch), fpos, odom_pose)
+                publish_json(pub_follow, target)
+            elif follow.until:
+                follow.stop()                                                # 時間切れ(台車のノードが止まっていても追い続けない)
+            hand_streak = hand_streak + 1 if hand else 0
+            if hand_streak >= 2:
+                publish_point(pub_hand, hand["x"], hand["y"], hand["z"])
+
+            if found:
+                publish_person(found["x"], found["y"], found["z"])
+                if miss:
+                    publish_bool(pub_present, True)
+                miss = 0
+                hits += 1
             else:
-                z = float(np.median(valid)) / 1000.0
-                found = {"x": (u - cx) / fx * z,
-                         "y": (v - cy) / fy * z,     # 光学座標系なので y は下が+
-                         "z": z}
+                miss += 1
+                if miss in (3, 30):  # 途切れ通知(連投しない)
+                    publish_bool(pub_present, False)
 
-        looking.update(found is not None and abs(yaw) < LOOK_YAW)
-        if not follow.active:                                            # フォロー中は重い顔の見分けを休んで速くする
-            face_id.update(view, face_row, yaw if yaw is not None else 0.0)
+            if now - last_status >= STATUS_EVERY_SEC:
+                publish_bool(pub_alive, True)
+                last_status = now
 
-        # 画面のすぐ前の手(顔の枠はセンサー座標に戻してから除く)
-        sbox = None
-        if box:
-            h, w = color.shape[:2]
-            (u1, v1), (u2, v2) = (to_sensor_uv(box[0], box[1], w, h),
-                                  to_sensor_uv(box[0] + box[2], box[1] + box[3], w, h))
-            sbox = (min(u1, u2), min(v1, v2), abs(u2 - u1), abs(v2 - v1))
-        hand = detect_hand_near(depth, scale, sbox, (fx, fy, cx, cy))
-        floor.update(depth, scale, (fx, fy, cx, cy))
-        pts = floor_points(depth, scale, (fx, fy, cx, cy))
-        obstacle = detect_obstacles(pts)
-        publish_json(pub_obstacle, obstacle)
-        target = None
-        if follow.active:
-            fpos = None
-            if found:                                                    # 顔を床に水平な (x, 前) に直す
-                fpos = (found["x"], found["z"] * math.cos(floor.pitch) - found["y"] * math.sin(floor.pitch))
-            target = follow.update(pts, math.tan(math.atan2(cy, fy) - floor.pitch), fpos, odom_pose)
-            publish_json(pub_follow, target)
-        elif follow.until:
-            follow.stop()                                                # 時間切れ(台車のノードが止まっていても追い続けない)
-        hand_streak = hand_streak + 1 if hand else 0
-        if hand_streak >= 2:
-            publish_point(pub_hand, hand["x"], hand["y"], hand["z"])
-
-        if found:
-            publish_person(found["x"], found["y"], found["z"])
-            if miss:
-                publish_bool(pub_present, True)
-            miss = 0
-            hits += 1
-        else:
-            miss += 1
-            if miss in (3, 30):  # 途切れ通知(連投しない)
-                publish_bool(pub_present, False)
-
-        if now - last_status >= STATUS_EVERY_SEC:
-            publish_bool(pub_alive, True)
-            last_status = now
-
-        if now - last_log >= LOG_EVERY_SEC:
-            state = (f"person x={found['x']:+.2f} y={found['y']:+.2f} z={found['z']:.2f}m"
-                     if found else "no person")
-            state += (f", yaw={yaw:+.2f}{' looking' if looking.state else ''}" if yaw is not None else "")
-            state += f", hand z={hand['z']:.2f}m" if hand else ""
-            if target:
-                state += (", follow lost" if target["lost"] else
-                          f", follow x={target['x']:+.2f} d={target['d']:.2f}m{' face' if target['face'] else ''}")
-            state += f", floor h={floor.height:.2f}m pitch={math.degrees(floor.pitch):+.0f}{'(auto)' if floor.auto else '(env)'}"
-            state += ", obstacle " + " ".join(f"{k}={'-' if v is None else f'{v:.2f}'}" for k, v in obstacle.items())
-            state += f", id={face_id.id or '-'}({face_id.score:.2f})" if face_id.db is not None and found else ""
-            imu_state = (f", tilt roll={tilt.roll:+.0f} pitch={tilt.pitch:+.0f}" if imu and tilt.base
-                         else (", imu waiting" if imu else ""))
-            print(f"[perception] {state} ({frames / LOG_EVERY_SEC:.1f}fps, {hits} hits, {faces} faces, {no_depth} no-depth / "
-                  f"{LOG_EVERY_SEC}s{imu_state})")
-            if DEBUG_SNAPSHOT:
-                save_snapshot(view, box, found, depth, scale)
-            last_log, hits, faces, no_depth, frames = now, 0, 0, 0, 0
+            if now - last_log >= LOG_EVERY_SEC:
+                state = (f"person x={found['x']:+.2f} y={found['y']:+.2f} z={found['z']:.2f}m"
+                         if found else "no person")
+                state += (f", yaw={yaw:+.2f}{' looking' if looking.state else ''}" if yaw is not None else "")
+                state += f", hand z={hand['z']:.2f}m" if hand else ""
+                if target:
+                    state += (", follow lost" if target["lost"] else
+                              f", follow x={target['x']:+.2f} d={target['d']:.2f}m{' face' if target['face'] else ''}")
+                state += f", floor h={floor.height:.2f}m pitch={math.degrees(floor.pitch):+.0f}{'(auto)' if floor.auto else '(env)'}"
+                state += ", obstacle " + " ".join(f"{k}={'-' if v is None else f'{v:.2f}'}" for k, v in obstacle.items())
+                state += f", id={face_id.id or '-'}({face_id.score:.2f})" if face_id.db is not None and found else ""
+                imu_state = (f", tilt roll={tilt.roll:+.0f} pitch={tilt.pitch:+.0f}" if imu and tilt.base
+                             else (", imu waiting" if imu else ""))
+                print(f"[perception] {state} ({frames / LOG_EVERY_SEC:.1f}fps, {hits} hits, {faces} faces, {no_depth} no-depth / "
+                      f"{LOG_EVERY_SEC}s{imu_state})")
+                if DEBUG_SNAPSHOT:
+                    save_snapshot(view, box, found, depth, scale)
+                last_log, hits, faces, no_depth, frames = now, 0, 0, 0, 0
+    finally:                                                             # エラーのときもカメラを閉じる(開いたままだと開き直せない)
+        for close in ((imu.stop,) if imu else ()) + (pipeline.stop,):
+            try:
+                close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

@@ -34,7 +34,8 @@ ritsu_perception.py — 律の人検出 ROS 2 ノード (Orbbec Gemini 335)
   フォローモードの人の追い方: 深度の点を上から見た地図(FOLLOW_CELL 角のマス)にして、つながった「かたまり」に分ける。
   始めは顔が見えていればその真下のかたまり、見えなければ正面いちばん近くの人くらいの大きさ(幅・高さ)のかたまりを
   「この人」と決め、あとは前のフレームの位置のすぐ近くのかたまりを追う(台車のカメラは低いので、近くに立つ人の顔は
-  画角の上に出る。追うのは胴体と足)。顔が見えたら、その真下のかたまりで確かめ直す。
+  画角の上に出る。追うのは胴体と足)。顔が見えたら、その真下で確かめ直す。狭い部屋では人と家具・壁が1つのかたまりに
+  つながるので、顔の真下や前の位置のまわり FOLLOW_WINDOW だけを見て人の位置を決める。
   UNO Q では数 fps しか処理できないので、前に見た位置は台車の動き(/odom)で補正し、探す範囲は前に見つけてからの時間で広げる
 
 環境変数:
@@ -113,6 +114,9 @@ FOLLOW_LOCK_DEG = 30        # 始めるとき、正面からこの角度以内�
 FOLLOW_LOCK_DIST = 3.5      # [m] 始めるとき、これより遠い人は選ばない
 PERSON_WIDTH = (0.15, 0.9)  # [m] 人とみなすかたまりの幅(上から見た左右の広がり)
 PERSON_TOP = 0.9            # [m] 人とみなすには、床からこの高さまで(画角の上に出るならその手前まで)届いている
+FOLLOW_WINDOW = 0.22        # [m] 人の所だけを見る半径(人の幅の半分くらい。顔の真下・前の位置のまわり。家具や壁とつながっていても分けられる)
+FOLLOW_WINDOW_POINTS = 15   # その中にこれだけ点があれば人がいるとみなす
+FOLLOW_CONFIRM_SEC = 8.0    # まわりだけを見て追うのは、顔か人の形で最後に確かめてからこの秒数まで(人が去ったあと家具を追い続けない)
 FOLLOW_EXCLUDE = 0.4        # [m] ついていく人のまわりのこの範囲は、フォロー用の障害物から除く
 SNAPSHOT_PATH = "/app/debug/camera.jpg"
 
@@ -567,6 +571,7 @@ class FollowTracker:
         self.seen = 0.0          # 最後に見つけた時刻
         self.odom = None         # 前に位置を直したときの台車の (x, y, 向き)(odom 座標)
         self.said = 0.0          # 人を決められない理由をログに出した時刻
+        self.confirmed = 0.0     # 顔か人の形(かたまり)で最後に人だと確かめた時刻
 
     @property
     def active(self):
@@ -582,10 +587,10 @@ class FollowTracker:
         self.until, self.pos = 0.0, None
 
     @staticmethod
-    def blobs(pts, top_ray):
-        """上から見た地図のかたまり: [{"x","d","w","person","cells":(x[], d[], 数[])}]"""
+    def grid(pts):
+        """上から見た地図: (点の数, いちばん高い点 [m]) のマス目。床の小物・すねより下の段差は見ない"""
         x, fwd, height = pts
-        sel = height > 0.2                                               # 床の小物・すねより下の段差は見ない
+        sel = height > 0.2
         x, fwd, height = x[sel], fwd[sel], height[sel]
         nx, nd = int(4.0 / FOLLOW_CELL), int(FOLLOW_RANGE / FOLLOW_CELL)
         ix, idd = ((x + 2.0) / FOLLOW_CELL).astype(int), (fwd / FOLLOW_CELL).astype(int)
@@ -595,6 +600,12 @@ class FollowTracker:
         top = np.zeros((nd, nx), np.float32)
         np.add.at(count, (idd, ix), 1)
         np.maximum.at(top, (idd, ix), height)
+        return count, top
+
+    @staticmethod
+    def blobs(g, top_ray):
+        """上から見た地図のかたまり: [{"x","d","w","depth","top","need","person"}]"""
+        count, top = g
         occ = (count >= 2).astype(np.uint8)
         n, labels, stats, _ = cv2.connectedComponentsWithStats(cv2.dilate(occ, np.ones((3, 3), np.uint8)), connectivity=8)
         out = []
@@ -606,14 +617,34 @@ class FollowTracker:
                 continue
             bx = (float((cx_ * wgt).sum() / wgt.sum()) + 0.5) * FOLLOW_CELL - 2.0
             bd = (float((cd * wgt).sum() / wgt.sum()) + 0.5) * FOLLOW_CELL
-            w = stats[i, cv2.CC_STAT_WIDTH] * FOLLOW_CELL
+            w, depth = stats[i, cv2.CC_STAT_WIDTH] * FOLLOW_CELL, stats[i, cv2.CC_STAT_HEIGHT] * FOLLOW_CELL
             h_need = min(PERSON_TOP, floor.height + bd * top_ray - 0.15)   # 画角の上に出るなら、その手前まで届けば良い
-            person = (PERSON_WIDTH[0] <= w <= PERSON_WIDTH[1] and stats[i, cv2.CC_STAT_HEIGHT] * FOLLOW_CELL <= 0.9
-                      and float(top[cells].max()) >= h_need)
-            out.append({"x": bx, "d": bd, "w": w, "person": person, "depth": stats[i, cv2.CC_STAT_HEIGHT] * FOLLOW_CELL,
-                        "top": float(top[cells].max()), "need": h_need,
-                        "cells": ((cx_ + 0.5) * FOLLOW_CELL - 2.0, (cd + 0.5) * FOLLOW_CELL, wgt)})
+            tp = float(top[cells].max())
+            out.append({"x": bx, "d": bd, "w": w, "depth": depth, "top": tp, "need": h_need,
+                        "person": PERSON_WIDTH[0] <= w <= PERSON_WIDTH[1] and depth <= 0.9 and tp >= h_need})
         return out
+
+    @staticmethod
+    def window(g, pos, r=FOLLOW_WINDOW, steps=3):
+        """pos のまわり r だけの点の重心へ寄せていく(まわりの家具や壁とつながっていても、人の所だけを見る)。
+        ((x, 前), 点の数, いちばん高い点) か None"""
+        count, top = g
+        k = int(r / FOLLOW_CELL) + 1
+        for _ in range(steps):
+            cx0, cd0 = int((pos[0] + 2.0) / FOLLOW_CELL), int(pos[1] / FOLLOW_CELL)
+            d0, d1 = max(0, cd0 - k), min(count.shape[0], cd0 + k + 1)
+            x0, x1 = max(0, cx0 - k), min(count.shape[1], cx0 + k + 1)
+            if d0 >= d1 or x0 >= x1:
+                return None
+            sub = count[d0:d1, x0:x1]
+            dd, xx = np.mgrid[d0:d1, x0:x1]
+            cxm, cdm = (xx + 0.5) * FOLLOW_CELL - 2.0, (dd + 0.5) * FOLLOW_CELL
+            m = (np.hypot(cxm - pos[0], cdm - pos[1]) <= r) & (sub >= 2)
+            if not m.any():
+                return None
+            w = sub[m].astype(np.float32)
+            pos = (float((cxm[m] * w).sum() / w.sum()), float((cdm[m] * w).sum() / w.sum()))
+        return pos, int(w.sum()), float(top[d0:d1, x0:x1][m].max())
 
     def follow_odom(self, pose):
         """前に見た人の位置を、そのあと台車が動いた分だけずらす(人は止まっているとみなす)。pose は今の台車の (x, y, 向き)"""
@@ -635,19 +666,22 @@ class FollowTracker:
         now = time.time()
         self.follow_odom(pose)
         gate = min(FOLLOW_GATE_MAX, FOLLOW_GATE + FOLLOW_PERSON_SPEED * max(0.0, now - self.seen - 0.3))
-        blobs = self.blobs(pts, top_ray)
-        near = lambda b, p: math.hypot(b["x"] - p[0], b["d"] - p[1])
-        pick = None
-        if face:                                                         # 顔の真下のかたまり(人だと確かめられる)
-            cand = [b for b in blobs if near(b, face) < 0.5 and b["w"] <= 1.2]
-            fb = min(cand, key=lambda b: near(b, face), default=None)
-            if fb and (self.pos is None or near(fb, self.pos) < max(gate, 0.8)):
-                pick = fb
+        g = self.grid(pts)
+        blobs = self.blobs(g, top_ray)
+        near = lambda b, p: math.hypot(b[0] - p[0], b[1] - p[1])
+        need = lambda d: min(PERSON_TOP, floor.height + d * top_ray - 0.15)
+        pick, by = None, ""
+        if face:                                                         # 顔の真下(人だと確かめられる)
+            w = self.window(g, face)
+            if w and w[1] >= FOLLOW_WINDOW_POINTS and (self.pos is None or near(w[0], self.pos) < max(gate, 0.8)):
+                pick, by = w[0], "face"
         if pick is None and self.pos is None:                            # 始め: 正面いちばん近くの人くらいのかたまり
             cand = [b for b in blobs if b["person"] and b["d"] <= FOLLOW_LOCK_DIST
                     and abs(math.degrees(math.atan2(b["x"], b["d"]))) <= FOLLOW_LOCK_DEG]
-            pick = min(cand, key=lambda b: b["d"], default=None)
-            if pick is None and now - self.said > 2.0:                   # 決められない理由(正面に見えているかたまり)
+            b = min(cand, key=lambda b: b["d"], default=None)
+            if b:
+                pick, by = (b["x"], b["d"]), "body"
+            elif now - self.said > 2.0:                                  # 決められない理由(正面に見えているかたまり)
                 self.said = now
                 front = sorted((b for b in blobs if abs(math.degrees(math.atan2(b["x"], b["d"]))) <= 45),
                                key=lambda b: b["d"])[:4]
@@ -655,24 +689,28 @@ class FollowTracker:
                     f"x={b['x']:+.2f} d={b['d']:.2f} w={b['w']:.2f}/{PERSON_WIDTH[0]}-{PERSON_WIDTH[1]} "
                     f"depth={b['depth']:.2f}/0.9 top={b['top']:.2f}/{b['need']:.2f}" for b in front) or "nothing in front")
                     + (f"; face d={face[1]:.2f}" if face else ""), flush=True)
-        elif pick is None:                                               # 前の位置のすぐ近く(人らしい方を優先)
-            cand = [b for b in blobs if near(b, self.pos) <= gate]
-            pick = min(cand, key=lambda b: (not b["person"], near(b, self.pos)), default=None)
-        if pick is not None:
-            bx, bd = pick["x"], pick["d"]
-            if pick["w"] > PERSON_WIDTH[1] and self.pos is not None:    # 壁や物とくっついた: 前の位置のまわりだけで重心をとる
-                cx_, cd, wgt = pick["cells"]
-                m = np.hypot(cx_ - self.pos[0], cd - self.pos[1]) < 0.22   # 人の幅の半分くらい
-                if m.any():
-                    bx, bd = float((cx_[m] * wgt[m]).sum() / wgt[m].sum()), float((cd[m] * wgt[m]).sum() / wgt[m].sum())
-            if self.pos is None:
-                print(f"[perception] follow: locked x={bx:+.2f} d={bd:.2f}m ({'face' if face else 'body'})")
-                self.pos = (bx, bd)
+        elif pick is None:
+            # 前の位置のすぐ近くの、人くらいの大きさのかたまり。無ければ(家具や壁とつながった)前の位置のまわりだけを見る
+            cand = [b for b in blobs if b["person"] and near((b["x"], b["d"]), self.pos) <= gate]
+            b = min(cand, key=lambda b: near((b["x"], b["d"]), self.pos), default=None)
+            if b:
+                pick, by = (b["x"], b["d"]), "body"
             else:
-                self.pos = (0.4 * self.pos[0] + 0.6 * bx, 0.4 * self.pos[1] + 0.6 * bd)
+                w = self.window(g, self.pos)
+                if (w and w[1] >= FOLLOW_WINDOW_POINTS and w[2] >= need(w[0][1]) and near(w[0], self.pos) <= gate
+                        and now - self.confirmed <= FOLLOW_CONFIRM_SEC):
+                    pick, by = w[0], "near"
+        if pick is not None:
+            if self.pos is None:
+                print(f"[perception] follow: locked x={pick[0]:+.2f} d={pick[1]:.2f}m ({by})")
+                self.pos = pick
+            else:
+                self.pos = (0.4 * self.pos[0] + 0.6 * pick[0], 0.4 * self.pos[1] + 0.6 * pick[1])
             self.seen = now
+            if by in ("face", "body"):
+                self.confirmed = now
         lost = pick is None
-        out = {"lost": lost, "face": bool(face and pick is not None and near(pick, face) < 0.5),
+        out = {"lost": lost, "face": by == "face",
                "obstacle": detect_obstacles(pts, None if self.pos is None else self.pos)}
         if not lost:
             out["x"], out["d"] = round(self.pos[0], 2), round(self.pos[1], 2)

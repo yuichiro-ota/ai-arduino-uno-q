@@ -575,7 +575,7 @@ class RitsuBrain {
     }
     if (e && e.type === 'follow' && e.state === 'stop') {   // フォローが終わった(頼まれてやめたときは返事済み)
       const text = { time: 'ついていくのは、ここまでにしますね。', camera: 'まわりがよく見えないので、ついていけません。',
-                     nobody: 'ついていく人が見つかりません。律の前に立ってから、もう一度言ってくださいね。',
+                     nobody: 'ついていく人が見つかりません。律のほうを向いて、前に立ってから、もう一度言ってくださいね。',
                      lost: 'あ、見失ってしまいました。ここで止まりますね。' }[e.why];
       if (text) this.act({ text, motion: e.why === 'time' ? 'nod' : 'shakeNo', emotion: e.why === 'time' ? 'neutral' : 'sad', source: 'llm' });
       return;

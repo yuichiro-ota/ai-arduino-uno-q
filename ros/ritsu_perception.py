@@ -73,6 +73,8 @@ ROTATE = int(os.environ.get("CAMERA_ROTATE", "0"))
 FPS = float(os.environ.get("PERCEPTION_FPS", "15"))
 LOG_EVERY_SEC = 5   # 検出状況をログへ出す間隔
 NO_FRAME_RESTART_SEC = 10   # この秒数カメラから映像が来なければ開き直す
+STALL_EXIT_SEC = 30         # カメラの処理がこの秒数まったく進まなければ(SDK の中で固まった)、プロセスを終了して
+                            # Docker に起動し直してもらう(restart: unless-stopped)
 STATUS_EVERY_SEC = 2        # /ritsu/camera_alive を送る間隔
 FACE_MODEL = os.environ.get("FACE_MODEL", "/app/models/yunet.onnx")
 FACE_SCORE = float(os.environ.get("FACE_SCORE", "0.6"))   # 顔とみなす信頼度の下限
@@ -722,9 +724,24 @@ def spin():
 
 
 threading.Thread(target=spin, daemon=True).start()
+loop_alive = time.time()    # カメラの処理が最後に進んだ時刻(見張りが見る)
+
+
+def watchdog():
+    """カメラの処理が固まったら終了する(映像が来ないだけなら main が NO_FRAME_RESTART_SEC で開き直すので、それより長く待つ)"""
+    while True:
+        time.sleep(5)
+        if time.time() - loop_alive > STALL_EXIT_SEC:
+            print(f"[perception] camera loop stalled for {STALL_EXIT_SEC}s — exit and let docker restart", flush=True)
+            os._exit(1)
+
+
+threading.Thread(target=watchdog, daemon=True).start()
 
 
 def main():
+    global loop_alive
+    loop_alive = time.time()
     detector = cv2.FaceDetectorYN.create(FACE_MODEL, "", (640, 480), FACE_SCORE, 0.3, 5)
 
     pipeline, (fx, fy, cx, cy) = open_camera()
@@ -745,6 +762,7 @@ def main():
     hand = None
     yaw = None
     while True:
+        loop_alive = time.time()
         fs = pipeline.wait_for_frames(200)
         cf = fs.get_color_frame() if fs else None
         df = fs.get_depth_frame() if fs else None
@@ -862,5 +880,6 @@ if __name__ == "__main__":
             if not rclpy.ok():
                 break
             print(f"[perception] error: {e} — retry in 3s", flush=True)
+            loop_alive = time.time()
             publish_bool(pub_present, False)
             time.sleep(3)

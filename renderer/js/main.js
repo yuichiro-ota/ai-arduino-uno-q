@@ -378,7 +378,8 @@
   let listenNod = null;
   voice = RITSU_CFG.voiceOn ? new RitsuVoice(RITSU_CFG.voice, {
     // 返事を考えている間と、(needPerson のとき)カメラに誰も映っていない間は聞かない(周りの話し声に答えないように)
-    canListen: () => !brain.busy && (!RITSU_CFG.voice.needPerson || ctx.personPresent),
+    // 動く頼みの返事・おさんぽとフォローの始め・終わりの言葉の間も聞かない(動き出したモーターの音で割り込まない。brain.protecting)
+    canListen: () => !brain.busy && !brain.protecting && (!RITSU_CFG.voice.needPerson || ctx.personPresent),
     onText: text => {
       if (chatOverRos()) pubJson('/ritsu/chat_user', { text, from: 'voice' });
       else brain.chat(text, { from: 'voice' });

@@ -86,6 +86,11 @@ const MOVE_COMMANDS = [
   { action: 'right', re: /(右|みぎ)(を|に|の方を?|のほうを?)?(向|む)いて|(右|みぎ)に(回|まわ)って/,
     lines: ['はい、右を向きますね。', 'わかりました。右ですね。'], motion: 'nod' },
 ];
+// 動く頼みの返事と、おさんぽ・フォローの始め・終わりの言葉は最後まで言う: その間は聞かず(動き出したモーターの音を声と
+// 間違えて割り込んだり、別の会話を始めたりしないように)、独り言・反応もしない。長さは読み上げにかかる時間の見込み
+const PROTECT_BASE_SEC = 1.2;  // 読み上げの声を作る時間
+const PROTECT_PER_CHAR = 0.17; // 1文字あたり
+const MOVE_AFTER_SEC = 5;      // おさんぽ・フォローが終わったあともこの秒数は独り言・反応をしない(終わりの言葉を言い切る・止まったばかり)
 const MOVE_WALK_SEC = 70;      // おさんぽ(1分)・フォロー(5分)の間は独り言を止める。終わりの知らせが来なくてもこの秒数で戻す
 const MOVE_FOLLOW_SEC = 310;
 const MOVE_TOO_CLOSE = 0.6;   // [m] 目の前の人がこれより近いと前に出ない
@@ -418,8 +423,9 @@ class RitsuBrain {
     this.onFollow = onFollow || (() => {});
     this.sideRequests = new Set();   // 独り言・反応の LLM 問い合わせ(話しかけられたら打ち切る)
     // 静かにしている間・おさんぽ中・フォロー中は、自分から言うセリフ(独り言・反応 = source が idle〜)を言わず、動きだけにする
-    this.act = a => act((this.quiet || this.moving) && a.text && String(a.source).startsWith('idle') ? { ...a, text: null } : a);
+    this.act = a => act((this.quiet || this.moving || this.protecting) && a.text && String(a.source).startsWith('idle') ? { ...a, text: null } : a);
     this.movingUntil = { walk: 0, follow: 0 };   // おさんぽ・フォローが終わるはずの時刻(台車の知らせで始め・終わりを知る)
+    this.protectUntil = 0;                         // この時刻までは今の言葉を最後まで言う(_protect)
     this.quietUntil = 0;
     this.onQuery = onQuery || (() => {});
     this.queries = 0;
@@ -510,6 +516,14 @@ class RitsuBrain {
     if (this.queue.length) this.chat(this.queue.shift());
   }
 
+  /** 動く頼みの返事・おさんぽとフォローの始め・終わりの言葉を言っている途中か(聞かない・独り言をしない) */
+  get protecting() { return performance.now() < this.protectUntil; }
+
+  /** text を最後まで言えるように、読み上げにかかる時間だけ聞くのと独り言・反応を止める */
+  _protect(text) {
+    this.protectUntil = Math.max(this.protectUntil, performance.now() + (PROTECT_BASE_SEC + text.length * PROTECT_PER_CHAR) * 1000);
+  }
+
   /** おさんぽ中・フォロー中か(独り言・しばらく居る人への声かけをしない) */
   get moving() { const now = performance.now(); return now < this.movingUntil.walk || now < this.movingUntil.follow; }
 
@@ -565,6 +579,9 @@ class RitsuBrain {
     else if (cmd.action === 'walk' || cmd.action === 'walk_off') this.onWalk(cmd.action === 'walk');
     else if (cmd.action === 'follow' || cmd.action === 'follow_off') this.onFollow(cmd.action === 'follow');
     else if (!close) this.onMove(cmd.action);
+    if (cmd.action === 'walk' || cmd.action === 'follow')   // 台車の「始めた」の知らせが届く前から独り言・反応を止める
+      this.movingUntil[cmd.action] = Math.max(this.movingUntil[cmd.action], performance.now() + MOVE_AFTER_SEC * 1000);
+    this._protect(text);
     this.history = [...this.history, { role: 'user', content: userText }, { role: 'assistant', content: text }].slice(-12);
     this.act({ text, motion: close ? 'shakeNo' : cmd.motion, emotion: close ? 'shy' : 'happy', source: 'llm' });
     this.lastInteraction = this.lastChat = performance.now();
@@ -575,22 +592,24 @@ class RitsuBrain {
    *  (十字ボタンで動かしているときは /remote に出るので言わない) */
   onBaseEvent(e) {
     if (e && (e.type === 'walk' || e.type === 'follow')) {   // 終わりの知らせが届かなくても、決めた時間+少しで独り言を戻す
-      this.movingUntil[e.type] = e.state === 'start' ? performance.now() + (e.type === 'walk' ? MOVE_WALK_SEC : MOVE_FOLLOW_SEC) * 1000 : 0;
+      this.movingUntil[e.type] = performance.now() +
+        (e.state === 'start' ? (e.type === 'walk' ? MOVE_WALK_SEC : MOVE_FOLLOW_SEC) : MOVE_AFTER_SEC) * 1000;
     }
     if (e && e.type === 'walk' && e.state === 'stop') {   // おさんぽが終わった(頼まれてやめたときは返事済み)
       const text = { time: 'お散歩おしまいです。楽しかったです。', camera: 'まわりがよく見えないので、お散歩はやめておきますね。',
                      blocked: 'まわりが通れないので、お散歩はここまでにしますね。' }[e.why];
-      if (text) this.act({ text, motion: e.why === 'time' ? 'happyBounce' : 'shakeNo', emotion: e.why === 'time' ? 'happy' : 'sad', source: 'llm' });
+      if (text) { this._protect(text); this.act({ text, motion: e.why === 'time' ? 'happyBounce' : 'shakeNo', emotion: e.why === 'time' ? 'happy' : 'sad', source: 'llm' }); }
       return;
     }
     if (e && e.type === 'follow' && e.state === 'stop') {   // フォローが終わった(頼まれてやめたときは返事済み)
       const text = { time: 'ついていくのは、ここまでにしますね。', camera: 'まわりがよく見えないので、ついていけません。',
                      nobody: 'ついていく人が見つかりません。律のほうを向いて、前に立ってから、もう一度言ってくださいね。',
                      lost: 'あ、見失ってしまいました。ここで止まりますね。' }[e.why];
-      if (text) this.act({ text, motion: e.why === 'time' ? 'nod' : 'shakeNo', emotion: e.why === 'time' ? 'neutral' : 'sad', source: 'llm' });
+      if (text) { this._protect(text); this.act({ text, motion: e.why === 'time' ? 'nod' : 'shakeNo', emotion: e.why === 'time' ? 'neutral' : 'sad', source: 'llm' }); }
       return;
     }
     if (e && e.type === 'blocked' && e.by === 'follow') {   // 人との間が両側とも塞がって待っている
+      this._protect('前がふさがっていて、ついていけません。');
       this.act({ text: '前がふさがっていて、ついていけません。', motion: 'shakeNo', emotion: 'sad', source: 'llm' });
       return;
     }

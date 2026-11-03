@@ -86,6 +86,8 @@ const MOVE_COMMANDS = [
   { action: 'right', re: /(右|みぎ)(を|に|の方を?|のほうを?)?(向|む)いて|(右|みぎ)に(回|まわ)って/,
     lines: ['はい、右を向きますね。', 'わかりました。右ですね。'], motion: 'nod' },
 ];
+const MOVE_WALK_SEC = 70;      // おさんぽ(1分)・フォロー(5分)の間は独り言を止める。終わりの知らせが来なくてもこの秒数で戻す
+const MOVE_FOLLOW_SEC = 310;
 const MOVE_TOO_CLOSE = 0.6;   // [m] 目の前の人がこれより近いと前に出ない
 // 上の言い方に当てはまらなくても、動きの手がかりがある短い言葉は LLM に7択で1語だけ答えさせて聞き分ける
 // (4-link-robot の Jev と同じく、答えを選択肢に縛って短く返させるので、ふつうの会話よりずっと速い)
@@ -415,8 +417,9 @@ class RitsuBrain {
     this.onWalk = onWalk || (() => {});
     this.onFollow = onFollow || (() => {});
     this.sideRequests = new Set();   // 独り言・反応の LLM 問い合わせ(話しかけられたら打ち切る)
-    // 静かにしている間は、自分から言うセリフ(独り言・反応 = source が idle〜)を言わず、動きだけにする
-    this.act = a => act(this.quiet && a.text && String(a.source).startsWith('idle') ? { ...a, text: null } : a);
+    // 静かにしている間・おさんぽ中・フォロー中は、自分から言うセリフ(独り言・反応 = source が idle〜)を言わず、動きだけにする
+    this.act = a => act((this.quiet || this.moving) && a.text && String(a.source).startsWith('idle') ? { ...a, text: null } : a);
+    this.movingUntil = { walk: 0, follow: 0 };   // おさんぽ・フォローが終わるはずの時刻(台車の知らせで始め・終わりを知る)
     this.quietUntil = 0;
     this.onQuery = onQuery || (() => {});
     this.queries = 0;
@@ -507,6 +510,9 @@ class RitsuBrain {
     if (this.queue.length) this.chat(this.queue.shift());
   }
 
+  /** おさんぽ中・フォロー中か(独り言・しばらく居る人への声かけをしない) */
+  get moving() { const now = performance.now(); return now < this.movingUntil.walk || now < this.movingUntil.follow; }
+
   /** 静かにしている間(QUIET_SEC 秒)か */
   get quiet() { return performance.now() < this.quietUntil; }
 
@@ -568,6 +574,9 @@ class RitsuBrain {
   /** 台車からの知らせ(/ritsu/base_event)。頼まれて前に進もうとしたのに障害物で止まったら、そう伝える
    *  (十字ボタンで動かしているときは /remote に出るので言わない) */
   onBaseEvent(e) {
+    if (e && (e.type === 'walk' || e.type === 'follow')) {   // 終わりの知らせが届かなくても、決めた時間+少しで独り言を戻す
+      this.movingUntil[e.type] = e.state === 'start' ? performance.now() + (e.type === 'walk' ? MOVE_WALK_SEC : MOVE_FOLLOW_SEC) * 1000 : 0;
+    }
     if (e && e.type === 'walk' && e.state === 'stop') {   // おさんぽが終わった(頼まれてやめたときは返事済み)
       const text = { time: 'お散歩おしまいです。楽しかったです。', camera: 'まわりがよく見えないので、お散歩はやめておきますね。',
                      blocked: 'まわりが通れないので、お散歩はここまでにしますね。' }[e.why];
@@ -697,7 +706,9 @@ class RitsuBrain {
       setTimeout(() => {
         const quietSec = (performance.now() - this.lastInteraction) / 1000;
         const sincePeek = (performance.now() - this.lastPeek) / 1000;
-        if (!this.busy && !this.deciding && quietSec > RITSU_CFG.idleMinSec && sincePeek > 8 && this._lingering()) {
+        if (this.moving) {
+          // おさんぽ・フォロー中は独り言も、目の前の人(ついていく人)への声かけもしない
+        } else if (!this.busy && !this.deciding && quietSec > RITSU_CFG.idleMinSec && sincePeek > 8 && this._lingering()) {
           this._onLinger();
         } else if (!this.busy && !this.deciding && quietSec > RITSU_CFG.idleMinSec && sincePeek > 8) {   // のぞき込み直後は控える
           const notice = text => this.act({ motion: Math.random() < 0.5 ? 'noticeL' : 'noticeR',

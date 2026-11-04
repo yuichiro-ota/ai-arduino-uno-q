@@ -1,0 +1,41 @@
+%% アクティビティ図②: 台車のノード (ritsu_base) が 1秒に20回決めること — 上ほど優先
+flowchart TD
+  classDef jrule fill:#fef9c3,stroke:#ca8a04,stroke-width:3px,color:#0f172a
+  classDef rule fill:#f1f5f9,stroke:#64748b,color:#0f172a
+  classDef act fill:#dcfce7,stroke:#16a34a,color:#0f172a
+  classDef sense fill:#dcfce7,stroke:#16a34a,color:#0f172a
+  classDef note fill:#fefce8,stroke:#eab308,stroke-dasharray:3 3,color:#422006,font-size:14px
+  classDef term fill:#0f172a,stroke:#0f172a,color:#ffffff
+  classDef warn fill:#fee2e2,stroke:#ef4444,color:#0f172a
+
+  T(("1秒に20回")):::term --> P1{"十字ボタン<br/>操作中?"}
+  P1 -->|はい| A1["その通り動く"]:::act
+  P1 -->|いいえ| P2{"少し動く<br/>頼み中?"}
+  P2 -->|はい| A2["決めた距離・角度だけ動く"]:::act
+  P2 -->|いいえ| P3{"フォロー中?"}
+  P3 -->|はい| F["☆ follow_decide<br/>人へ進む / 左右へよける / 待つ"]:::jrule
+  P3 -->|いいえ| P4{"人の方を<br/>向く途中?"}
+  P4 -->|はい| A4["人の方へ回る"]:::act
+  P4 -->|いいえ| P5{"おさんぽ中?"}
+  P5 -->|はい| W["☆ walk_decide<br/>進む / 左右へ回る"]:::jrule
+  P5 -->|いいえ| A5["止まっている"]:::act
+
+  A1 --> G
+  A2 --> G
+  F --> G
+  A4 --> G
+  W --> G
+  A5 --> G
+  G{"安全装置<br/>正面 0.4m に物?"}
+  G -->|はい| BLK["前進だけ止める"]:::warn
+  G -->|いいえ| OUT["4輪の速さを STM32 へ"]:::rule
+  BLK --> OUT
+  OUT --> N(("次の回へ")):::term
+
+  N1["📝 上から順に見て、最初に当てはまった<br/>動きだけを使う（十字ボタンが最優先）"]:::note
+  N2["📝 ☆ Jev と同じ形の判断（LLM なし・ルール）。<br/>カメラの障害物（前・左・右）と人の位置で<br/>FORWARD / LEFT / RIGHT / WAIT を選ぶ"]:::note
+  N3["📝 どの動きでも最後に必ず通る安全装置"]:::note
+  N1 -.- P1
+  N2 -.- F
+  N2 -.- W
+  N3 -.- G

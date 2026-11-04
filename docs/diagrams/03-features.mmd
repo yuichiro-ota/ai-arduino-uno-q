@@ -1,0 +1,79 @@
+%% 律(Ritsu) 機能一覧 — 色で「何が判断しているか」、赤い太枠で「フィジカルAI に入る機能」を分ける (Mermaid block 図)
+%% banner: 🤖 フィジカルAI ＝ ① 深度カメラで見る → ② Jev 風に判断する → ③ 台車が動く（赤い太枠の機能が、この流れに入る）
+block-beta
+  columns 5
+  block:SEE:1
+    columns 1
+    HS["🤖 見る（深度カメラ）"]
+    S1["人の顔と位置"]
+    S2["マスターの顔を見分ける"]
+    S3["目が合った・手が近い"]
+    S6["傾き（IMU）"]
+    S4["障害物（前・左・右）"]
+    S5["ついていく人の位置"]
+  end
+  block:TALK:1
+    columns 1
+    HT["聞く・話す"]
+    T1["声を文字にする（Whisper）"]
+    T2["会話の返事"]
+    T3["読み上げ・口パク（VOICEVOX）"]
+    HB["画面の体"]
+    B1["モーション・表情"]
+    B2["目線で人を追う"]
+  end
+  block:THINK:1
+    columns 1
+    HK["考える・覚える"]
+    K1["人への反応を決める"]
+    K2["独り言"]
+    K3["会話から覚える"]
+    K4["ニュース・天気を知る"]
+    K5["「静かに」で黙る"]
+    K6["反応の学習"]
+  end
+  block:CARTF:1
+    columns 1
+    HC["🤖 動く（台車）"]
+    C1["「止まって」すぐ止まる"]
+    C2["「前に来て」「右向いて」"]
+    C3["★ あいまいな頼み「もうちょい前」"]
+    C4["話した人の方を向く"]
+    C5["☆ おさんぽ（障害物をよける）"]
+    C6["☆ フォロー（人についていく）"]
+    C7["安全装置（正面 0.4m で止まる）"]
+    C8["4輪の速さ制御（STM32）"]
+  end
+  block:LEG:1
+    columns 1
+    HL["色の意味"]
+    L1["LLM が自由に考える"]
+    L2["★ Jev 風 LLM（選択肢から1語）"]
+    L3["☆ Jev と同じ形のルール判断"]
+    L4["決まったルール・制御"]
+    L5["センサー・認識"]
+    L6["🤖 赤い太枠 ＝ フィジカルAI"]
+  end
+
+  classDef head fill:#0f172a,stroke:#0f172a,color:#ffffff
+  classDef llm fill:#dbeafe,stroke:#2563eb,color:#0f172a
+  classDef jev fill:#ffedd5,stroke:#ea580c,stroke-width:3px,color:#0f172a
+  classDef jrule fill:#fef9c3,stroke:#ca8a04,stroke-width:3px,color:#0f172a
+  classDef rule fill:#f1f5f9,stroke:#64748b,color:#0f172a
+  classDef sense fill:#dcfce7,stroke:#16a34a,color:#0f172a
+  classDef senseP fill:#dcfce7,stroke:#dc2626,stroke-width:4px,color:#0f172a
+  classDef ruleP fill:#f1f5f9,stroke:#dc2626,stroke-width:4px,color:#0f172a
+  classDef jevP fill:#ffedd5,stroke:#dc2626,stroke-width:4px,color:#0f172a
+  classDef jruleP fill:#fef9c3,stroke:#dc2626,stroke-width:4px,color:#0f172a
+  classDef legP fill:#ffffff,stroke:#dc2626,stroke-width:4px,color:#0f172a
+  class HS,HT,HB,HK,HC,HL head
+  class T2,K1,K2,K3,L1 llm
+  class L2 jev
+  class L3 jrule
+  class T3,B1,B2,K4,K5,K6,C1,C2,C8,L4 rule
+  class S2,S3,S6,T1,L5 sense
+  class S1,S4,S5 senseP
+  class C4,C7 ruleP
+  class C3 jevP
+  class C5,C6 jruleP
+  class L6 legP

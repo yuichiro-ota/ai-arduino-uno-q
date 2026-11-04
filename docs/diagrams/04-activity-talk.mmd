@@ -1,0 +1,37 @@
+%% アクティビティ図①: 話しかけ・人が来たとき → どの判断で、どう動くか
+flowchart TD
+  classDef llm fill:#dbeafe,stroke:#2563eb,color:#0f172a
+  classDef jev fill:#ffedd5,stroke:#ea580c,stroke-width:3px,color:#0f172a
+  classDef rule fill:#f1f5f9,stroke:#64748b,color:#0f172a
+  classDef act fill:#dcfce7,stroke:#16a34a,color:#0f172a
+  classDef op fill:#f5f3ff,stroke:#8b5cf6,color:#0f172a
+  classDef note fill:#fefce8,stroke:#eab308,stroke-dasharray:3 3,color:#422006,font-size:14px
+  classDef term fill:#0f172a,stroke:#0f172a,color:#ffffff
+
+  S1(("開始")):::term --> IN[/"話しかける<br/>（声 か /remote）"/]:::op
+  IN --> STT["文字にする（Whisper）"]:::rule
+  STT --> Q{"どんな言葉?"}
+  Q -->|"止まって"| STOP["すぐ止まる"]:::act
+  Q -->|"決まった頼み"| RULE["台車を動かす<br/>おさんぽ・フォロー開始"]:::act
+  Q -->|"動く頼み（自由な言い方）"| JEV["★ Jev 風 LLM<br/>7択から1語選ぶ"]:::jev
+  Q -->|"それ以外"| CHAT["LLM が返事を考える"]:::llm
+  JEV --> RULE
+  STOP --> ACK["用意したセリフで返事"]:::rule
+  RULE --> ACK
+  ACK --> SAY["話す・表情・モーション"]:::act
+  CHAT --> SAY
+
+  S2(("開始")):::term --> SEE[/"人が来る・目が合う"/]:::op
+  SEE --> REACT["LLM が反応を決める"]:::llm
+  REACT -->|"反応する"| TURN["人の方を向く"]:::act
+  TURN --> SAY
+  SAY --> E(("終わり")):::term
+
+  N1["📝「止まって」は LLM を通さず<br/>いちばん先にすぐ止める"]:::note
+  N2["📝 ★ 選択肢（前・後ろ・左・右・こっち・止まる・関係ない）<br/>に縛って1語だけ答えさせる。約0.3〜0.7秒"]:::note
+  N3["📝 返事・独り言・反応は LLM が自由に考える<br/>（記憶・時刻・天気・ニュース入り）"]:::note
+  N4["📝 カメラで人を見つけると、<br/>話しかけられなくても反応する"]:::note
+  N1 -.- STOP
+  N2 -.- JEV
+  N3 -.- CHAT
+  N4 -.- SEE

@@ -1,0 +1,54 @@
+%% 律(Ritsu) ソフトウェア構成図 — Docker コンテナごとの ROS 2 ノードと、やり取りするトピック
+%% 丸い箱 = ROS 2 ノード / 箱の上の行 = Docker コンテナ名 / 矢印の文字 = トピック (▼▲▶◀ は流れる向き)
+flowchart TB
+  classDef web fill:#f5f3ff,stroke:#8b5cf6,color:#0f172a
+  classDef sub fill:#faf5ff,stroke:#c4b5fd,stroke-dasharray:4 3,color:#475569
+  classDef node fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#0f172a
+  classDef mw fill:#f1f5f9,stroke:#64748b,color:#0f172a
+  classDef mcu fill:#fff4e5,stroke:#f59e0b,color:#0f172a
+  classDef srv fill:#ecfdf5,stroke:#10b981,color:#0f172a
+  classDef hw fill:#ffffff,stroke:#94a3b8,color:#0f172a
+  classDef note fill:#fefce8,stroke:#eab308,stroke-dasharray:3 3,color:#422006,font-size:14px
+
+  MIC["スピーカーフォン"]:::hw
+  KIOSK["<small>UNO Q ホスト</small><br/>Chromium kiosk<br/>画面の律・brain.js"]:::web
+  REMOTE["/remote（補助）<br/>スマホのブラウザ"]:::sub
+  NGINX["<small>🐳 ritsu-renderer</small><br/>nginx :8080"]:::mw
+
+  LLM["<small>サーバー</small><br/>LiteLLM → Ollama"]:::srv
+  STT["<small>サーバー</small><br/>Whisper"]:::srv
+  TTS["<small>サーバー</small><br/>VOICEVOX"]:::srv
+
+  RB(["<small>🐳 ritsu-rosbridge</small><br/>rosbridge_websocket :9090"]):::node
+  MEM(["<small>🐳 ritsu-memory</small><br/>ritsu_memory"]):::node
+  PER(["<small>🐳 ritsu-camera</small><br/>ritsu_perception"]):::node
+  BASE(["<small>🐳 ritsu-base</small><br/>ritsu_base"]):::node
+  CAM["深度カメラ"]:::hw
+
+  ROUTER["<small>UNO Q ホスト</small><br/>arduino-router"]:::mw
+  SK["UNO Q マイコン側<br/>sketch.ino"]:::mcu
+
+  N1["📝 フィジカルAI の中心：<br/>perception が見た人・障害物を<br/>base が受け取って台車を動かす"]:::note
+  N2["📝 画面の律（brain.js）は<br/>rosbridge 経由で ROS 2 の<br/>トピックをやり取りする"]:::note
+  N3["📝 サーバーへの中継で<br/>API キーは nginx が付ける"]:::note
+  N1 -.- BASE
+  N2 -.- KIOSK
+  N3 -.- NGINX
+  LEG["📝 丸い箱 ＝ ROS 2 ノード<br/>🐳 ＝ Docker コンテナ名<br/>矢印の文字 ＝ トピック"]:::note
+
+  MIC <--> KIOSK
+  KIOSK -->|HTTP| NGINX
+  REMOTE -.->|HTTP| NGINX
+  NGINX -->|/llm/| LLM
+  NGINX -->|/stt/| STT
+  NGINX -->|/tts/| TTS
+  NGINX -->|"/rosbridge<br/>WebSocket"| RB
+
+  RB <-->|"▼ memory_put ・ log<br/>▲ memory"| MEM
+  RB <-->|"▼ enroll ・ follow<br/>▲ person ・ looking<br/>person_id ・ hand_near<br/>tilt ・ obstacle"| PER
+  RB <-->|"▼ /cmd_vel ・ turn<br/>move ・ walk ・ follow<br/>▲ base_status<br/>base_event"| BASE
+  CAM --> PER
+  PER <-->|"▶ person ・ obstacle<br/>follow_target<br/>◀ /odom ・ follow"| BASE
+
+  BASE -->|msgpack-RPC| ROUTER
+  ROUTER -->|Bridge| SK

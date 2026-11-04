@@ -1,0 +1,62 @@
+---
+config:
+  layout: elk
+---
+%% 律(Ritsu) 機器の構成図 — 編集したら render.sh で PNG を作り直す
+flowchart LR
+  classDef dev fill:#eef6ff,stroke:#3b82f6,color:#0f172a
+  classDef mcu fill:#fff4e5,stroke:#f59e0b,color:#0f172a
+  classDef pwr fill:#fee2e2,stroke:#ef4444,color:#0f172a
+  classDef srv fill:#ecfdf5,stroke:#10b981,color:#0f172a
+  classDef note fill:#fefce8,stroke:#eab308,stroke-dasharray:3 3,color:#422006,font-size:14px
+  classDef usr fill:#f5f3ff,stroke:#8b5cf6,color:#0f172a
+
+  HUMAN(["話しかける人"]):::usr
+  PHONE["スマホ・PC（補助）<br/>/remote ページ<br/>文字入力・手動操作"]:::usr
+
+  subgraph CART["台車 ＝ 律の体"]
+    direction LR
+    subgraph IO["USB 機器"]
+      direction TB
+      SPK["スピーカーフォン<br/>＝ 耳と口"]:::dev
+      CAM["深度カメラ<br/>Gemini 335 ＝ 目"]:::dev
+      MON["縦置きモニター<br/>＝ 画面の律"]:::dev
+    end
+    subgraph UNOQ["Arduino UNO Q"]
+      direction TB
+      MPU["Linux 側<br/>見る・考える・話す<br/>（Docker + ROS 2）"]:::dev
+      MCU["マイコン側<br/>車輪を回す<br/>（STM32）"]:::mcu
+    end
+    subgraph LEGS["足回り"]
+      direction TB
+      DRV["モータードライバー<br/>L298N ×2"]:::mcu
+      MOT["メカナム車輪 ×4<br/>エンコーダー付きモーター"]:::mcu
+      BAT["バッテリー 12V"]:::pwr
+    end
+  end
+
+  subgraph LAN["サーバー"]
+    direction TB
+    LLM["LLM サーバー<br/>LiteLLM → Ollama gemma3"]:::srv
+    VOICE["音声サーバー<br/>Whisper（聞き取り）<br/>VOICEVOX（読み上げ）"]:::srv
+  end
+
+  N1["📝 律の体 ＝ 台車。UNO Q 1枚で<br/>Linux 側が見る・考える・話す、<br/>マイコン側が車輪を回す"]:::note
+  N2["📝 重い AI（LLM・音声認識・読み上げ）は<br/>サーバーの GPU に任せ、台車は軽く保つ"]:::note
+  N3["📝 話しかけは声が基本。<br/>スマホの /remote は補助"]:::note
+  N1 -.- UNOQ
+  N2 -.- LAN
+  N3 -.- HUMAN
+  HUMAN <-->|声で会話| SPK
+  HUMAN -.-|顔・姿| CAM
+  HUMAN -.-|律を見る| MON
+  PHONE -.->|Wi-Fi| MPU
+  SPK <-->|USB| MPU
+  CAM -->|USB| MPU
+  MON <-->|USB-C 映像| MPU
+  MPU <-->|Bridge| MCU
+  MCU <-->|速さの指令・回転数| DRV
+  BAT ==> DRV
+  DRV --> MOT
+  MPU <-->|HTTP| LLM
+  MPU <-->|HTTP| VOICE

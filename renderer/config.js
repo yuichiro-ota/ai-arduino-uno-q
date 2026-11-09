@@ -4,7 +4,7 @@
 window.RITSU_CONFIG = {
   // LLM API のベースURL。既定の /llm は nginx が LiteLLM へ中継する(接続先とキーは .env)
   llmUrl: '/llm',
-  // LiteLLM の model_name: chat(gemma3:4b・2ノード分散) / chat-large(gemma3:12b)
+  // LiteLLM の model_name: chat(gemma3:4b・3.17) / chat-large(gemma3:12b)
   llmModel: 'chat',
   llmTimeoutSec: 30,
 

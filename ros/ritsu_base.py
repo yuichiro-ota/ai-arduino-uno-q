@@ -24,6 +24,10 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
   /ritsu/person     geometry_msgs/PointStamped  顔の位置(光学座標系 x:右 z:前)
   /ritsu/walk       std_msgs/String  JSON {"on":true, "sec":60}  おさんぽモード: ゆっくり前に進み、正面 WALK_CLEAR 以内に物が
                     見えたらその場で空いている方へ回って、空いたらまた進む(後ろは見えないので下がらない)。
+                    どちらへ行くかは LLM に選ばせる(Jev と同じく選択肢の1語に縛る): 正面が塞がったら LEFT / RIGHT、
+                    広い所では WALK_LLM_EVERY 秒ごとに FORWARD / LEFT / RIGHT / PERSON(見えている人の方へ)。
+                    選択肢は空いている向きだけにするので、前に出る判断は LLM に任せない。WALK_LLM_TIMEOUT 秒で答えが
+                    無い・LLM が使えないときは決まりごと(walk_decide)で決める
                     sec 秒・「止まって」(/ritsu/move stop)・/cmd_vel(手の操作)・カメラの知らせが CAMERA_LOST_SEC 途切れたらやめる
                     (少しの途切れでは止まって待つ)
   /ritsu/follow     std_msgs/String  JSON {"on":true, "sec":300}  フォローモード: カメラのノードが追う人(/ritsu/follow_target)の方を
@@ -39,7 +43,8 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
   /ritsu/base_status  std_msgs/String  JSON {"ok":bool, "error":"...", "fault":[...], "enc_b":[...], "speed":[4輪 m/s], "cmd":[vx,vy,wz],
                                                 "turn":"向いている理由" or null, "turn_enable":bool, "move":"動いている向き" or null,
                                                 "obstacle":{"front","left","right"} or null, "blocked":bool,
-                                                "walk":"forward"|"left"|"right" or null(おさんぽ中の動き),
+                                                "walk":"forward"|"left"|"right"|"person"|"think" or null(おさんぽ中の動き。
+                                                think は正面が塞がって次の向きを LLM に聞いている),
                                                 "follow":"find"|"forward"|"near"|"turn"|"left"|"right"|"wait"|"lost" or null,
                                                 "follow_dist": ついていく人までの距離 [m] or null}
   /ritsu/base_event   std_msgs/String  JSON {"type":"blocked","by":"move"|"manual"|"walk","dist":0.32,"free":"left"|"right"|null}
@@ -67,6 +72,10 @@ arduino-router(Linux 側の Bridge の仲立ち)経由で送る。エンコー�
   OBSTACLE_STOP   正面の障害物がこれより近いと前に進まない [m] (default 0.4)
   WALK_SPEED      おさんぽで前に進む速さ [m/s] (default 0.08)
   WALK_CLEAR      おさんぽで、正面の物がこれより近くなったら向きを変える [m] (default 0.7)
+  WALK_LLM        おさんぽの行き先を LLM に選ばせるか (default 1。0 なら決まりごとだけ)
+  WALK_LLM_URL    LLM の問い合わせ先 (default http://127.0.0.1:8080/llm/v1/chat/completions。nginx が API キーを付ける)
+  WALK_LLM_MODEL  LiteLLM の model_name (default chat)
+  WALK_LLM_EVERY  広い所で行き先を選び直す間隔 [秒] (default 8)
   FOLLOW_DIST     フォローで人との間をこれだけあける [m] (default 0.7)
   FOLLOW_SPEED    フォローで前に進む速さの上限 [m/s] (default 0.15)
 """
@@ -74,7 +83,9 @@ import json
 import math
 import os
 import socket
+import threading
 import time
+import urllib.request
 
 import msgpack
 import rclpy
@@ -114,6 +125,23 @@ WALK_CLEAR = float(os.environ.get("WALK_CLEAR", "0.7"))
 WALK_TURN_SPEED = 0.5                # [rad/s] おさんぽで向きを変える速さ
 WALK_TURN_MAX_DEG = 200              # 回ってもこれだけで正面が空かなければやめる(囲まれている)
 WALK_SEC_MAX = 600
+WALK_LLM = os.environ.get("WALK_LLM", "1") != "0"
+WALK_LLM_URL = os.environ.get("WALK_LLM_URL", "http://127.0.0.1:8080/llm/v1/chat/completions")
+WALK_LLM_MODEL = os.environ.get("WALK_LLM_MODEL", "chat")
+WALK_LLM_EVERY = float(os.environ.get("WALK_LLM_EVERY", "8"))
+WALK_LLM_FIRST = 2.0                 # [秒] 始めてからこれだけで最初の行き先を選ぶ
+WALK_LLM_TIMEOUT = 2.0               # [秒] LLM がこれより遅ければ決まりごと(walk_decide)で決める
+WALK_LLM_REST_SEC = 60               # LLM につながらなかったら、この秒数は決まりごとだけで歩く
+WALK_VEER_DEG = 40                   # 広い所で LEFT / RIGHT を選んだら、この角度だけ向きを変えてまた進む
+WALK_PERSON_SEC = 1.5                # これより前に見えた顔は「人が見えている」に入れない
+WALK_PERSON_MIN_DEG = 10             # 人がほぼ正面なら PERSON は選択肢に入れない(FORWARD と同じ)
+WALK_PROMPT = """台車に乗ったロボット「律」が部屋の中をお散歩している。今の様子から、次の動きを選択肢から1つだけ選んで答える。
+FORWARD = このまま前へ進む / LEFT = 左へ向きを変える / RIGHT = 右へ向きを変える / PERSON = 見えている人の方へ向きを変えて進む
+選び方:
+- 広く空いている方へ行く。物が近い方は選ばない。
+- 同じ向きばかり選ばず、まだ向いていない方も見に行く(「スタートから見た今の向き」と「最近選んだ動き」を参考にする)。
+- 人が見えていたら、ときどき近づいてみる。
+- 選択肢に無いものは答えない。"""
 FOLLOW_DIST = float(os.environ.get("FOLLOW_DIST", "0.7"))
 FOLLOW_SPEED = float(os.environ.get("FOLLOW_SPEED", "0.15"))
 FOLLOW_GAIN = 0.5                    # 人までの距離の余り [m] に掛けて前に進む速さにする
@@ -190,7 +218,7 @@ def main():
           "speed": [0.0] * 4, "fault": 0, "enc_b": 0, "ok": False, "error": "", "n": 0, "t": time.monotonic(),
           "person": None, "turn": None, "turn_enable": TURN_ENABLE, "move": None,
           "obstacle": None, "obstacle_at": 0.0, "blocked": False, "blocked_said": 0.0, "walk": None,
-          "follow": None, "target": None}
+          "follow": None, "target": None, "llm_rest": 0.0}
 
     def on_cmd(msg):
         st["cmd"] = (clamp(msg.linear.x, MAX_LINEAR), clamp(msg.linear.y, MAX_LINEAR), clamp(msg.angular.z, MAX_ANGULAR))
@@ -322,7 +350,9 @@ def main():
             return
         if st["follow"]:
             stop_follow("walk")
-        st["walk"] = {"until": time.monotonic() + sec, "phase": "forward", "dir": 1.0, "th": 0.0}
+        now = time.monotonic()
+        st["walk"] = {"until": now + sec, "since": now, "phase": "forward", "dir": 1.0, "th": 0.0, "th0": st["th"],
+                      "ask": None, "asked": now - WALK_LLM_EVERY + WALK_LLM_FIRST, "hist": [], "think": False}
         st["move"] = st["turn"] = None
         node.get_logger().info(f"おさんぽ: 始める({sec:.0f}秒)")
         event({"type": "walk", "state": "start"})
@@ -333,12 +363,116 @@ def main():
         event({"type": "walk", "state": "stop", "why": why})
 
     def walk_decide(o):
-        """おさんぽの次の動き(4-link-robot の Jev と同じ形の判断。後ろは見えないので BACK は使わず、その場で回る)。
-        local-jev などに差し替えるときはここを置き換える"""
+        """おさんぽの次の動きの決まりごと(4-link-robot の Jev と同じ形の判断。後ろは見えないので BACK は使わず、その場で回る)。
+        LLM が遅い・使えないときに使う"""
         if o["front"] is None or o["front"] >= WALK_CLEAR:
             return "FORWARD"
         return "LEFT" if free_side() == "left" else "RIGHT" if free_side() == "right" else (
             "LEFT" if (o["left"] or 9.0) >= (o["right"] or 9.0) else "RIGHT")
+
+    def person_seen():
+        """おさんぽで使う人の位置 (右への角度 [rad], 距離 [m])。少し前から見えていなければ None"""
+        p = st["person"]
+        if not p or time.monotonic() - p[2] > WALK_PERSON_SEC:
+            return None
+        return math.atan2(p[0], p[1]), math.hypot(p[0], p[1])
+
+    def walk_choices(o, blocked):
+        """LLM に出す選択肢。空いている向きだけにする(正面が塞がっていれば FORWARD を出さない)"""
+        far = {k: (o[k] if o[k] is not None else 9.0) for k in ("left", "right")}
+        sides = [k.upper() for k in ("left", "right") if far[k] >= OBSTACLE_FREE]
+        if blocked:
+            return sides or ["LEFT", "RIGHT"]   # 両方塞がっていても、その場で回るだけなので両方出す
+        p = person_seen()
+        person = p and abs(math.degrees(p[0])) >= WALK_PERSON_MIN_DEG and p[1] > WALK_CLEAR + 0.3
+        return ["FORWARD"] + sides + (["PERSON"] if person else [])
+
+    def walk_situation(o, w, choices):
+        """LLM に渡す今の様子"""
+        def side(k, name):
+            return f"{name}: {o[k]:.1f}m 先に物がある" if o[k] is not None else f"{name}: 物は見えない(空いている)"
+        lines = [side("front", "前"), side("left", "左"), side("right", "右")]
+        p = person_seen()
+        if p:
+            deg = math.degrees(p[0])
+            where = "正面" if abs(deg) < WALK_PERSON_MIN_DEG else f"{'右' if deg > 0 else '左'}に{abs(deg):.0f}度"
+            lines.append(f"人: {where}、{p[1]:.1f}m 先に見えている")
+        else:
+            lines.append("人: 見えていない")
+        turned = (math.degrees(st["th"] - w["th0"]) + 180) % 360 - 180
+        lines.append("スタートから見た今の向き: " +
+                     ("ほぼ同じ" if abs(turned) < 20 else f"{'左' if turned > 0 else '右'}に{abs(turned):.0f}度"))
+        lines.append(f"お散歩を始めてから: {time.monotonic() - w['since']:.0f}秒")
+        lines.append("最近選んだ動き: " + (", ".join(w["hist"]) or "まだない"))
+        lines.append("選択肢: " + " / ".join(choices))
+        return "\n".join(lines)
+
+    def walk_llm(req, text):
+        """別のスレッドで LLM に聞く(台車の制御を止めないように)。答えは req に入れる"""
+        try:
+            body = json.dumps({
+                "model": WALK_LLM_MODEL, "temperature": 0.7, "max_tokens": 12,
+                "messages": [{"role": "system", "content": WALK_PROMPT}, {"role": "user", "content": text}],
+                "response_format": {"type": "json_schema", "json_schema": {"name": "walk", "schema": {
+                    "type": "object", "properties": {"action": {"type": "string", "enum": req["choices"]}},
+                    "required": ["action"]}}},
+            }, ensure_ascii=False).encode()
+            r = urllib.request.Request(WALK_LLM_URL, data=body, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(r, timeout=WALK_LLM_TIMEOUT + 1) as res:
+                reply = json.loads(res.read())["choices"][0]["message"]["content"].upper()
+            req["result"] = next((c for c in req["choices"] if c in reply), None)   # JSON でも1語でも拾う
+            if not req["result"]:
+                req["error"] = f"選択肢に無い答え: {reply[:40]}"
+        except Exception as e:
+            req["error"], req["down"] = str(e)[:120], True
+        finally:
+            req["sec"] = time.monotonic() - req["at"]
+            req["done"] = True
+
+    def walk_ask(kind, o, w):
+        """次の動きを LLM に聞き始める。選ぶ余地が無い・LLM を使わない・休んでいるときは None(決まりごとで決める)"""
+        choices = walk_choices(o, kind == "blocked")
+        if not WALK_LLM or len(choices) < 2 or time.monotonic() < st["llm_rest"]:
+            return None
+        req = {"kind": kind, "choices": choices, "at": time.monotonic(), "done": False, "result": None,
+               "error": None, "down": False, "sec": 0.0}
+        threading.Thread(target=walk_llm, args=(req, walk_situation(o, w, choices)), daemon=True).start()
+        return req
+
+    def walk_answer(req, fallback):
+        """(答え, どう決めたか)。LLM がまだ考えている間は None。遅い・失敗したら fallback(決まりごと)"""
+        if req is None:
+            return fallback, "決まりごと"
+        if req["done"] and req["result"]:
+            return req["result"], f"LLM {req['sec']:.1f}秒"
+        if req["done"]:
+            if req["down"]:
+                st["llm_rest"] = time.monotonic() + WALK_LLM_REST_SEC
+                node.get_logger().warn(f"おさんぽ: LLM が使えない({req['error']})。{WALK_LLM_REST_SEC}秒は決まりごとで歩く")
+            return fallback, f"決まりごと({req['error']})"
+        if time.monotonic() - req["at"] > WALK_LLM_TIMEOUT:
+            return fallback, "決まりごと(LLM が時間切れ)"
+        return None
+
+    def walk_apply(ans, o, kind):
+        """選んだ動きを始める"""
+        w, (act, how) = st["walk"], ans
+        w["ask"], w["think"] = None, False
+        w["hist"] = (w["hist"] + [act])[-4:]
+        where = f"正面 {o['front']:.2f}m に物" if kind == "blocked" else "広い所"
+        node.get_logger().info(f"おさんぽ: {where} → {act} ({how})")
+        if kind == "blocked":            # 正面が空くまで同じ向きに回る
+            w.update(phase="turn", dir=1.0 if act == "LEFT" else -1.0, th=st["th"])
+            return
+        deg, wdir = WALK_VEER_DEG, 1.0 if act == "LEFT" else -1.0
+        if act == "PERSON":
+            p = person_seen()
+            if not p:
+                return                   # 選んでいる間に見えなくなった: そのまま進む
+            deg, wdir = math.degrees(abs(p[0])), (-1.0 if p[0] > 0 else 1.0) * TURN_SIGN
+        if act != "FORWARD":
+            w.update(phase="veer", dir=wdir, th=st["th"], deg=deg, why=act,
+                     veer_until=time.monotonic() + math.radians(deg) / WALK_TURN_SPEED * 2 + 1)
 
     def walk_cmd():
         """おさんぽ中の (vx, wz)。やめたら None"""
@@ -355,11 +489,33 @@ def main():
         if not o:
             return 0.0, 0.0              # 知らせが少し途切れた: 見えないまま進まず、止まって待つ
         if w["phase"] == "forward":
-            act = walk_decide(o)
-            if act == "FORWARD":
+            ask = w["ask"]
+            if o["front"] is not None and o["front"] < WALK_CLEAR:
+                if not ask or ask["kind"] != "blocked":
+                    ask = w["ask"] = walk_ask("blocked", o, w)
+                ans = walk_answer(ask, walk_decide(o))
+                if ans is None:
+                    w["think"] = True
+                    return 0.0, 0.0      # 次の向きを考えている間は止まって待つ
+                walk_apply(ans, o, "blocked")
+            else:
+                if ask and ask["kind"] == "blocked":
+                    ask = w["ask"] = None   # 考えている間に正面が空いた
+                    w["think"] = False
+                if ask:
+                    ans = walk_answer(ask, "FORWARD")   # 答えを待つ間も進む(前に出るのは安全装置が見ている)
+                    if ans is not None:
+                        walk_apply(ans, o, "open")
+                elif time.monotonic() - w["asked"] >= WALK_LLM_EVERY:
+                    w["asked"] = time.monotonic()
+                    w["ask"] = walk_ask("open", o, w)
+                if w["phase"] == "forward":
+                    return WALK_SPEED, 0.0
+        if w["phase"] == "veer":         # 広い所で少し向きを変えている(決めた角度まで回ったらまた進む)
+            if abs(math.degrees(st["th"] - w["th"])) >= w["deg"] or time.monotonic() > w["veer_until"]:
+                w["phase"] = "forward"
                 return WALK_SPEED, 0.0
-            w.update(phase="turn", dir=1.0 if act == "LEFT" else -1.0, th=st["th"])
-            node.get_logger().info(f"おさんぽ: 正面 {o['front']:.2f}m に物 → {'左' if act == 'LEFT' else '右'}へ向きを変える")
+            return 0.0, WALK_TURN_SPEED * w["dir"]
         # 向きを変えている: 正面が空くまで同じ向きに回る(行ったり来たりしない)
         if o["front"] is None or o["front"] >= WALK_CLEAR + 0.1:
             w["phase"] = "forward"
@@ -368,6 +524,19 @@ def main():
             stop_walk("blocked")
             return None
         return 0.0, WALK_TURN_SPEED * w["dir"]
+
+    def walk_state():
+        """/remote に出すおさんぽ中の動き"""
+        w = st["walk"]
+        if not w:
+            return None
+        if w["think"]:
+            return "think"
+        if w["phase"] == "forward":
+            return "forward"
+        if w["phase"] == "veer" and w.get("why") == "PERSON":
+            return "person"
+        return "left" if w["dir"] > 0 else "right"
 
     def on_follow(msg):
         try:
@@ -605,8 +774,7 @@ def main():
             "move": st["move"]["action"] if st["move"] else None,
             "obstacle": st["obstacle"] if time.monotonic() - st["obstacle_at"] < OBSTACLE_STALE_SEC else None,
             "blocked": st["blocked"],
-            "walk": (None if not st["walk"] else "forward" if st["walk"]["phase"] == "forward"
-                     else "left" if st["walk"]["dir"] > 0 else "right"),
+            "walk": walk_state(),
             "follow": st["follow"]["act"] if st["follow"] else None,
             "follow_dist": (round(math.hypot(*st["target"]["pos"]), 2) if st["follow"] and st["target"] and st["target"]["pos"]
                             and time.monotonic() - st["target"]["at"] <= FOLLOW_STALE_SEC else None),
@@ -624,7 +792,8 @@ def main():
     node.create_subscription(String, "/ritsu/follow_target", on_follow_target, 10)
     node.create_timer(1.0 / RATE_HZ, tick)
     node.get_logger().info(f"台車: 車輪 直径{WHEEL_R * 2:.3f}m 向き{INVERT} 最大 {MAX_LINEAR}m/s {MAX_ANGULAR}rad/s "
-                           f"ソケット {ROUTER_SOCK} 人の方を向く {'する' if TURN_ENABLE else 'しない'}(最大 {TURN_MAX}rad/s)")
+                           f"ソケット {ROUTER_SOCK} 人の方を向く {'する' if TURN_ENABLE else 'しない'}(最大 {TURN_MAX}rad/s) "
+                           f"おさんぽの行き先 {'LLM(' + WALK_LLM_MODEL + ')' if WALK_LLM else '決まりごと'}")
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, Exception):

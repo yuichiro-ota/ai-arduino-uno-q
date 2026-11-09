@@ -436,7 +436,7 @@
     follow.checked = !!st.follow;
     $('drive-state').textContent = !st.ok ? `STM32 とつながりません(${st.error})`
       : st.fault && st.fault.length ? `${st.fault.join('・')}が回らないので止めました(引っかかり・配線を確認)`
-      : (st.test ? `${st.test}を試し回し中` : st.follow ? `フォロー中(${FOLLOW_STATE[st.follow] || st.follow}${st.follow_dist != null ? `・人まで ${st.follow_dist.toFixed(2)}m` : ''})` : st.walk ? `おさんぽ中(${{ forward: '進んでいる', left: '左へ向きを変えている', right: '右へ向きを変えている' }[st.walk]})` : st.turn ? '人の方を向いています' : st.move ? `少し動いています(${{ forward: '前', back: '後ろ', left: '左', right: '右' }[st.move]})` : 'つながっています') +
+      : (st.test ? `${st.test}を試し回し中` : st.follow ? `フォロー中(${FOLLOW_STATE[st.follow] || st.follow}${st.follow_dist != null ? `・人まで ${st.follow_dist.toFixed(2)}m` : ''})` : st.walk ? `おさんぽ中(${{ forward: '進んでいる', left: '左へ向きを変えている', right: '右へ向きを変えている', person: '人の方へ向かっている', think: '次の向きを考えている' }[st.walk]})` : st.turn ? '人の方を向いています' : st.move ? `少し動いています(${{ forward: '前', back: '後ろ', left: '左', right: '右' }[st.move]})` : 'つながっています') +
         `・車輪の速さ[m/s] ${['左前', '右前', '左後', '右後'].map((w, i) => `${w} ${st.speed[i].toFixed(2)}`).join(' ')}` +
         (st.obstacle ? `・障害物[m] ${['front', 'left', 'right'].map(k => `${{ front: '前', left: '左', right: '右' }[k]} ${st.obstacle[k] == null ? '-' : st.obstacle[k].toFixed(2)}`).join(' ')}` +
                        (st.blocked ? '(前に近いので進みません)' : '') : '・障害物: カメラから知らせなし') +

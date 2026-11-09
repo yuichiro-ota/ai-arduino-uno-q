@@ -95,6 +95,9 @@ services:
       - OBSTACLE_STOP=${OBSTACLE_STOP:-0.4}         # [m] 正面の障害物がこれより近いと前に進まない
       - WALK_SPEED=${WALK_SPEED:-0.08}              # [m/s] おさんぽで前に進む速さ
       - WALK_CLEAR=${WALK_CLEAR:-0.7}               # [m] おさんぽで、正面の物がこれより近いと向きを変える
+      - WALK_LLM=${WALK_LLM:-1}                     # おさんぽの行き先を LLM に選ばせる(0 なら決まりごとだけ)
+      - WALK_LLM_MODEL=${WALK_LLM_MODEL:-chat}      # LiteLLM の model_name(nginx の /llm 経由で呼ぶ)
+      - WALK_LLM_EVERY=${WALK_LLM_EVERY:-8}         # [秒] 広い所で行き先を選び直す間隔
       - FOLLOW_DIST=${FOLLOW_DIST:-0.7}             # [m] フォローで人との間をあける距離
       - FOLLOW_SPEED=${FOLLOW_SPEED:-0.15}          # [m/s] フォローで前に進む速さの上限
     command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && exec python3 ritsu_base.py"]
